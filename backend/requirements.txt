@@ -1,0 +1,21 @@
+# Web Framework & ASGI Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Data Validation
+pydantic>=2.9.0
+email-validator>=2.0.0
+python-multipart>=0.0.12
+
+# Database & ODM (MongoDB)
+motor>=3.7.0
+pymongo>=4.10.0
+odmantic>=1.0.2
+
+# Security & Authentication
+PyJWT>=2.9.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.1
+
+# Environment & Utilities
+python-dotenv>=1.0.1
