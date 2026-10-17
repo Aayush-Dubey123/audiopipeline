@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from core import logger
 from core.config import get_settings
 from core.database.database import init_db
-from core.apis.middleware import SecurityHeadersMiddleware
+from core.apis.middleware import SecurityHeadersMiddleware, RateLimitMiddleware
 from core.apis.routes.catalog_routes import router as catalog_router
 from core.apis.routes.job_routes import router as job_router
 from core.services.jobs.job_worker import job_worker
@@ -107,7 +107,10 @@ def create_app() -> FastAPI:
     # 1. Inject security headers middleware
     application.add_middleware(SecurityHeadersMiddleware)
 
-    # 2. Inject CORS policy middleware
+    # 2. Inject rate limiting middleware
+    application.add_middleware(RateLimitMiddleware)
+
+    # 3. Inject CORS policy middleware
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,

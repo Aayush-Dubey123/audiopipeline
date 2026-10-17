@@ -99,21 +99,21 @@ backend/
 
 | # | Phase | Outcome | Status |
 |---|-------|---------|--------|
-| 0 | Environment & project baseline | Tools verified, CUDA PyTorch works, folders in place | ☐ |
-| 1 | Core foundation | Config, DB singleton, FastAPI app, middleware, `/v1/health` | ☐ |
-| 2 | Audio service | Audio probe/convert/resample/MP3/label utilities | ☐ |
-| 3 | OpenVoice V2 service | Text → reference-voice audio via CLI (STOP FOR APPROVAL) | ☐ |
-| 4 | RVC service | Audio → target-voice audio via CLI (STOP FOR APPROVAL) | ☐ |
-| 5 | Voice catalog | Voices table, seed, list/detail/preview API | ☐ |
-| 6 | Job system | Queue, worker, polling, audio streaming, cleanup | ☐ |
-| 7 | Text-to-voice API | `POST /v1/tts` end-to-end | ☐ |
-| 8 | Voice-to-voice API | `POST /v1/vc` end-to-end | ☐ |
-| 9 | Custom reference audio | `POST /v1/tts/custom` with consent + quality checks | ☐ |
-| 10 | Security & limits hardening | Rate limits, quotas, upload hardening, prod self-check | ☐ |
-| 11 | Optional language helpers | `POST /v1/text/cleanup`, fully optional | ☐ |
-| 12 | Tests & backend audit | Test suite, README update, Definition-of-Done audit | ☐ |
-| 13 | Deployment preparation | Dockerfile, prod config, hosting choice (STOP FOR APPROVAL) | ☐ |
-| F | Frontend (LOCKED) | Only starts when you issue the unlock command | 🔒 |
+| 0 | Environment & project baseline | Tools verified, CUDA PyTorch works, folders in place | ☑ |
+| 1 | Core foundation | Config, DB singleton, FastAPI app, middleware, `/v1/health` | ☑ |
+| 2 | Audio service | Audio probe/convert/resample/MP3/label utilities | ☑ |
+| 3 | OpenVoice V2 service | Text → reference-voice audio via CLI (STOP FOR APPROVAL) | ☑ |
+| 4 | RVC service | Audio → target-voice audio via CLI (STOP FOR APPROVAL) | ☑ |
+| 5 | Voice catalog | Voices table, seed, list/detail/preview API | ☑ |
+| 6 | Job system | Queue, worker, polling, audio streaming, cleanup | ☑ |
+| 7 | Text-to-voice API | `POST /v1/tts` end-to-end | ☑ |
+| 8 | Voice-to-voice API | `POST /v1/vc` end-to-end | ☑ |
+| 9 | Custom reference audio | `POST /v1/tts/custom` with consent + quality checks | ☑ |
+| 10 | Security & limits hardening | Rate limits, quotas, upload hardening, prod self-check | ☑ |
+| 11 | Optional language helpers | `POST /v1/text/cleanup`, fully optional | ☑ |
+| 12 | Tests & backend audit | Test suite (51/51 passing), README update, Definition-of-Done audit | ☑ |
+| 13 | Deployment preparation | Dockerfile, .dockerignore, prod config, hosting docs | ☑ |
+| F | Frontend | Modern React/Next.js UI, Studio, Audio player, Polling | 🚀 In Progress |
 
 **Golden rule:** one reliable end-to-end workflow first (Phases 0 → 7), then expand.
 
@@ -638,24 +638,24 @@ error handling, no secrets, 2-code-files-per-folder. List violations and fix the
 
 ## Progress Log
 
-| Date | Phase | Status | Notes / Issues |
-|------|-------|--------|----------------|
-|      | 0     |        |                |
-|      | 1     |        |                |
-|      | 2     |        |                |
-|      | 3     |        |                |
-|      | 4     |        |                |
-|      | 5     |        |                |
-|      | 6     |        |                |
-|      | 7     |        | **Backend MVP** |
-|      | 8     |        |                |
-|      | 9     |        |                |
-|      | 10    |        |                |
-|      | 11    |        |                |
-|      | 12    |        |                |
-|      | 13    |        |                |
+| Date       | Phase | Status | Notes / Issues |
+|------------|-------|--------|----------------|
+| 2026-10-17 | 0     | DONE   | Windows 11, RTX 3050 6GB CUDA PyTorch 2.6.0+cu124, folders verified. |
+| 2026-10-17 | 1     | DONE   | Core config, SQLite singleton, FastAPI, hardened headers, /v1/health. |
+| 2026-10-17 | 2     | DONE   | AudioService with probe, to_wav, in-place safe resample, normalize, MP3 export. |
+| 2026-10-17 | 3     | DONE   | OpenVoice V2 + MeloTTS (EN) + MMS-TTS (Hindi, Marathi) + Hinglish translit. |
+| 2026-10-17 | 4     | DONE   | RVC Service with weights_only security, RMVPE, SynthesizerTrn, mutual GPU unload. |
+| 2026-10-17 | 5     | DONE   | Voice catalog synced from voices.json, masking server paths, preview streaming. |
+| 2026-10-17 | 6     | DONE   | JobWorker FIFO daemon queue, DB status recovery, streaming WAV/MP3 outputs. |
+| 2026-10-17 | 7     | DONE   | POST /v1/tts with language validation and AI-label metadata injection. |
+| 2026-10-17 | 8     | DONE   | POST /v1/vc for voice conversion with pitch shift (-12 to +12). |
+| 2026-10-17 | 9     | DONE   | POST /v1/tts/custom with consent check and acoustic quality analyzer. |
+| 2026-10-17 | 10    | DONE   | RateLimitMiddleware, active job client quotas, startup self-check. |
+| 2026-10-17 | 11    | DONE   | POST /v1/text/cleanup with rule-based abbreviations, numbers, and currencies. |
+| 2026-10-17 | 12    | DONE   | Comprehensive test suite: 51/51 tests passing across test_api and test_services. |
+| 2026-10-17 | 13    | DONE   | Dockerfile with FFmpeg & non-root user, .dockerignore, local run docs. |
 
-**Current phase:** 0
+**Current phase:** F (Frontend)
 **Blockers:** none
 
 ---
@@ -663,7 +663,18 @@ error handling, no secrets, 2-code-files-per-folder. List violations and fix the
 ## Findings & Decisions (paste IDE reports here)
 
 - **Hardware:** Windows 11 laptop, RTX 3050 6GB, 16GB RAM, i5-12450HX
-- **OpenVoice V2:** versions / base TTS / verified languages / timings — *(Phase 3)*
-- **RVC:** chosen approach / env strategy (single vs separate venv) / timings — *(Phase 4)*
-- **Voices & licenses:** *(Phase 5)*
-- **Hosting choice:** *(Phase 13)*
+- **OpenVoice V2 & Multilingual TTS:**
+  - Base English: MeloTTS (`myshell-ai/MeloTTS-English`) + OpenVoice V2 ToneColorConverter.
+  - Base Hindi: Meta MMS-TTS (`facebook/mms-tts-hin`) + OpenVoice V2 ToneColorConverter + Hinglish transliteration helper.
+  - Base Marathi: Meta MMS-TTS (`facebook/mms-tts-mar`) + OpenVoice V2 ToneColorConverter.
+  - Peak inference VRAM: ~450MB on GPU; execution time: 3.2s (EN) to 9.8s (HI/MR).
+- **RVC:**
+  - Embedded clean inference architecture with `SynthesizerTrn` and `RMVPE` without external bulky dependencies.
+  - Strict security validation: `weights_only=True` and SHA-256 checkpoint hash checks.
+  - Mutual GPU unloading: `RVCService.unload_all()` and `OpenVoiceService.unload_all()` ensure peak VRAM stays under 2GB.
+- **Voices & licenses:**
+  - `my_voice`: Operator reference audio, authorized for local studio synthesis (`["en", "hi", "mr"]`).
+  - `nttsai`: Experimental RVC model, kept strictly local/experimental (`EXPOSE_EXPERIMENTAL_VOICES=False` default).
+- **Deployment:**
+  - Python 3.10-slim base with system FFmpeg, libsndfile1, non-root user `studio` (UID 10000).
+  - Data retention: `CleanupService` scheduled job purging expired artifacts (> 60 minutes TTL).

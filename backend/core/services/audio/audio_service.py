@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -210,6 +211,12 @@ class AudioService:
         logging.info(f"Executing AudioService.resample to {target_sample_rate}Hz on {input_path.name}")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        in_place = input_path.resolve() == output_path.resolve()
+        target_file = (
+            output_path.parent / f"_tmp_{uuid.uuid4().hex[:8]}_{output_path.name}"
+            if in_place
+            else output_path
+        )
 
         cmd = [
             "ffmpeg",
@@ -217,13 +224,17 @@ class AudioService:
             "-i", str(input_path),
             "-ar", str(target_sample_rate),
             "-ac", "1",
-            str(output_path),
+            str(target_file),
         ]
 
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+            if in_place:
+                shutil.move(str(target_file), str(output_path))
             return output_path
         except subprocess.CalledProcessError as error:
+            if in_place and target_file.exists():
+                target_file.unlink()
             logging.error(f"Error in AudioService.resample: {error.stderr}")
             raise AudioProcessingError(f"Resampling failed: {error.stderr}")
 
@@ -247,19 +258,29 @@ class AudioService:
         logging.info(f"Executing AudioService.normalize_loudness on {input_path.name}")
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        in_place = input_path.resolve() == output_path.resolve()
+        target_file = (
+            output_path.parent / f"_tmp_{uuid.uuid4().hex[:8]}_{output_path.name}"
+            if in_place
+            else output_path
+        )
 
         cmd = [
             "ffmpeg",
             "-y",
             "-i", str(input_path),
             "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-            str(output_path),
+            str(target_file),
         ]
 
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+            if in_place:
+                shutil.move(str(target_file), str(output_path))
             return output_path
         except subprocess.CalledProcessError as error:
+            if in_place and target_file.exists():
+                target_file.unlink()
             logging.error(f"Error in AudioService.normalize_loudness: {error.stderr}")
             raise AudioProcessingError(f"Loudness normalization failed: {error.stderr}")
 

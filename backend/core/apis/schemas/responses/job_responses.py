@@ -7,6 +7,18 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class JobCreatedResponse(BaseModel):
+    """
+    Immediate acknowledgement returned upon successfully enqueuing an inference job.
+    """
+
+    job_id: str = Field(..., description="Unique URL-safe job token identifier")
+    kind: str = Field(..., description="Execution pipeline type: tts, tts_custom, or vc")
+    status: str = Field(default="queued", description="Initial lifecycle state: queued")
+    message: str = Field(..., description="User-facing status confirmation message")
+    ai_generated: bool = Field(default=True, description="Attribution flag marking synthetic output")
+
+
 class JobStatusResponse(BaseModel):
     """
     Client-facing response model representing status and outcomes of an asynchronous job.
@@ -33,3 +45,14 @@ class JobDeleteResponse(BaseModel):
     job_id: str = Field(..., description="Identifier of the deleted job")
     status: str = Field(default="deleted", description="Confirmation status")
     message: str = Field(..., description="Informative status message")
+
+
+class TextCleanupResponse(BaseModel):
+    """
+    Response payload returned by the text cleanup and enhancement endpoint.
+    """
+
+    original: str = Field(..., description="Unmodified original input text")
+    cleaned: str = Field(..., description="Cleaned, expanded, and punctuated text")
+    provider_used: str = Field(..., description="Enhancement engine utilized ('rule_based', 'groq', 'gemini')")
+    service_available: bool = Field(default=True, description="Whether LLM service provider keys are configured")

@@ -392,4 +392,182 @@ def test_delete_job_endpoint() -> None:
         assert after_resp.status_code == 404
 
 
+def test_text_cleanup_endpoint() -> None:
+    """
+    Verify POST /v1/text/cleanup normalizes abbreviations and currencies.
+    """
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/text/cleanup",
+            json={"text": "Hello Dr. Stone! Your coffee costs $4.50... amazing!!!", "language": "en"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert "doctor Stone" in payload["cleaned"]
+        assert "4.50 dollars" in payload["cleaned"]
+        assert "amazing!" in payload["cleaned"]
+        assert payload["original"].startswith("Hello Dr. Stone")
+
+
+def test_create_tts_job_unsupported_language_returns_400() -> None:
+    """
+    Verify POST /v1/tts rejects languages not in supported catalog with HTTP 400.
+    """
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts",
+            json={"text": "Bonjour le monde", "voice_id": "my_voice", "language": "fr"},
+        )
+        assert response.status_code == 400
+        payload = response.json()
+        assert "error" in payload
+        assert "not supported" in payload["error"]["message"].lower()
+
+
+def test_create_tts_job_unknown_voice_returns_404() -> None:
+    """
+    Verify POST /v1/tts with non-existent voice_id returns HTTP 404.
+    """
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts",
+            json={"text": "Hello world", "voice_id": "nonexistent_voice_999", "language": "en"},
+        )
+        assert response.status_code == 404
+
+
+def test_create_tts_job_success_enqueues_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify POST /v1/tts accepts valid payload, creates job in DB, and returns HTTP 202.
+    """
+    from core.controllers.job_controller import job_worker
+
+    # Mock enqueue to prevent background inference during fast endpoint acceptance test
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id: None)
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts",
+            json={"text": "Testing production voice studio pipeline.", "voice_id": "my_voice", "language": "en"},
+        )
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["status"] == "queued"
+        assert "job_id" in payload
+        job_id = payload["job_id"]
+
+        # Confirm job exists in DB
+        status_resp = test_client.get(f"/v1/jobs/{job_id}")
+        assert status_resp.status_code == 200
+        assert status_resp.json()["job_id"] == job_id
+
+
+def test_create_custom_tts_without_consent_returns_400() -> None:
+    """
+    Verify POST /v1/tts/custom without explicit voice owner consent returns HTTP 400.
+    """
+    import io
+
+    fake_wav = io.BytesIO(b"RIFFdummydataWAVEfmt ")
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts/custom",
+            data={"text": "Voice cloning test", "language": "en", "consent": "false"},
+            files={"file": ("test.wav", fake_wav, "audio/wav")},
+        )
+        assert response.status_code == 400
+        assert "consent is required" in response.json()["error"]["message"].lower()
+
+
+def test_create_custom_tts_with_invalid_extension_returns_400() -> None:
+    """
+    Verify POST /v1/tts/custom with forbidden file extension returns HTTP 400.
+    """
+    import io
+
+    fake_file = io.BytesIO(b"executable content")
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts/custom",
+            data={"text": "Voice cloning test", "language": "en", "consent": "true"},
+            files={"file": ("malicious.exe", fake_file, "application/octet-stream")},
+        )
+        assert response.status_code == 400
+        assert "unsupported audio format" in response.json()["error"]["message"].lower()
+
+
+def test_create_custom_tts_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify POST /v1/tts/custom with valid audio and consent succeeds and returns HTTP 202.
+    """
+    import io
+    import soundfile as sf
+    import numpy as np
+    from core.controllers.job_controller import job_worker
+
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id: None)
+
+    # Generate 4s sine wave
+    sr = 22050
+    t = np.linspace(0, 4.0, int(sr * 4.0), endpoint=False)
+    sine = 0.5 * np.sin(2 * np.pi * 440 * t)
+    buf = io.BytesIO()
+    sf.write(buf, sine, sr, format="WAV")
+    wav_bytes = buf.getvalue()
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts/custom",
+            data={"text": "Cloned custom voice test.", "language": "en", "consent": "true"},
+            files={"file": ("sample_reference.wav", io.BytesIO(wav_bytes), "audio/wav")},
+        )
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["status"] == "queued"
+        assert "job_id" in payload
+
+
+def test_create_vc_job_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify POST /v1/vc accepts valid source audio and returns HTTP 202 for RVC voices.
+    """
+    import io
+    import soundfile as sf
+    import numpy as np
+    from unittest.mock import MagicMock
+    from core.controllers.job_controller import job_worker
+    from core.cruds.voice_crud import VoiceCRUD
+
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id: None)
+
+    mock_voice = MagicMock()
+    mock_voice.id = "test_rvc_voice"
+    mock_voice.name = "Test RVC Voice"
+    mock_voice.status = "available"
+    mock_voice.model_type = "rvc_model"
+    monkeypatch.setattr(
+        VoiceCRUD,
+        "get_voice_by_id",
+        lambda db, voice_id=None, **kwargs: mock_voice if voice_id == "test_rvc_voice" else None,
+    )
+
+    sr = 22050
+    t = np.linspace(0, 2.0, int(sr * 2.0), endpoint=False)
+    sine = 0.5 * np.sin(2 * np.pi * 440 * t)
+    buf = io.BytesIO()
+    sf.write(buf, sine, sr, format="WAV")
+    wav_bytes = buf.getvalue()
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/vc",
+            data={"voice_id": "test_rvc_voice", "pitch_shift": "0"},
+            files={"file": ("source.wav", io.BytesIO(wav_bytes), "audio/wav")},
+        )
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["status"] == "queued"
+        assert "job_id" in payload
+
+
 

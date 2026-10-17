@@ -32,6 +32,12 @@ from core.services.pipelines.rvc_service import (
 )
 from core.services.pipelines.rvc_core.synthesizer import SynthesizerTrn
 from core.services.pipelines.rvc_core.rmvpe import MelSpectrogram, E2E
+from core.services.llm.llm_service import LLMService
+from core.services.audio.validation_service import (
+    ValidationService,
+    InvalidAudioExtensionError,
+    ReferenceQualityError,
+)
 
 
 @pytest.fixture
@@ -620,4 +626,68 @@ def test_voice_crud_sync_and_filtering(tmp_path: Path) -> None:
         assert missing is None
     finally:
         db.close()
+
+
+def test_llm_service_rule_based_cleanup() -> None:
+    """
+    Verify rule-based script cleanup normalizes abbreviations, currency, and markdown.
+    """
+    raw_en = "Hello! Dr. Smith paid $5.00 for the **awesome** app... cool!!!"
+    cleaned_en = LLMService.rule_based_cleanup(raw_en, language="en")
+    assert "doctor Smith" in cleaned_en
+    assert "5.00 dollars" in cleaned_en
+    assert "**" not in cleaned_en
+    assert "cool!" in cleaned_en
+    assert "!!!" not in cleaned_en
+
+    # Devanagari numerals
+    raw_hi = "आज १२३ रुपये खर्च झाले."
+    cleaned_hi = LLMService.rule_based_cleanup(raw_hi, language="hi")
+    assert "123" in cleaned_hi
+    assert "१२३" not in cleaned_hi
+
+
+def test_validation_service_extension_allowlist() -> None:
+    """
+    Verify audio extension allowlist accepts valid audio and rejects dangerous formats.
+    """
+    assert ValidationService.sanitize_and_validate_extension("sample.wav") == ".wav"
+    assert ValidationService.sanitize_and_validate_extension("recording.MP3") == ".mp3"
+    assert ValidationService.sanitize_and_validate_extension("track.flac") == ".flac"
+
+    with pytest.raises(InvalidAudioExtensionError):
+        ValidationService.sanitize_and_validate_extension("malicious.exe")
+
+    with pytest.raises(InvalidAudioExtensionError):
+        ValidationService.sanitize_and_validate_extension("script.py")
+
+    with pytest.raises(InvalidAudioExtensionError):
+        ValidationService.sanitize_and_validate_extension("")
+
+
+def test_validation_service_inspect_reference_quality(temp_audio_dir: Path) -> None:
+    """
+    Verify reference quality inspection validates good audio and flags short audio.
+    """
+    # 1. Valid 4-second sine wave
+    sr = 22050
+    t = np.linspace(0, 4.0, int(sr * 4.0), endpoint=False)
+    sine = 0.5 * np.sin(2 * np.pi * 440 * t)
+    valid_wav = temp_audio_dir / "valid_ref.wav"
+    sf.write(str(valid_wav), sine, sr)
+
+    metrics = ValidationService.inspect_reference_audio_quality(valid_wav, min_duration=3.0)
+    assert metrics.duration_seconds >= 3.9
+    assert metrics.peak_amplitude > 0.4
+    assert metrics.is_clipped is False
+    assert metrics.is_too_quiet is False
+    assert metrics.quality_score > 0.7
+
+    # 2. Too short audio (< 3.0s) raises ReferenceQualityError
+    short_sine = 0.5 * np.sin(2 * np.pi * 440 * t[: int(sr * 1.5)])
+    short_wav = temp_audio_dir / "short_ref.wav"
+    sf.write(str(short_wav), short_sine, sr)
+
+    with pytest.raises(ReferenceQualityError, match="too short"):
+        ValidationService.inspect_reference_audio_quality(short_wav, min_duration=3.0)
 

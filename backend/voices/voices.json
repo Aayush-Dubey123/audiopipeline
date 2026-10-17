@@ -2,10 +2,12 @@
   {
     "id": "my_voice",
     "name": "My Voice",
-    "description": "Operator reference voice for speech synthesis",
+    "description": "Operator reference voice for multilingual speech synthesis and cloning",
     "style": "conversational",
     "languages": [
-      "en"
+      "en",
+      "hi",
+      "mr"
     ],
     "model_type": "openvoice_reference",
     "preview_file": "previews/my_voice_preview.wav",
@@ -13,7 +15,7 @@
     "license": "Owner's own voice, recorded and provided by the operator",
     "usage_permission": "Authorized by operator for local studio synthesis",
     "status": "available",
-    "limitations": "English only; optimized for clean conversational speech."
+    "limitations": "Supports English, Hindi, and Marathi. Optimized for clean conversational speech."
   },
   {
     "id": "nttsai",

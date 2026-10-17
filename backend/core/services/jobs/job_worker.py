@@ -77,6 +77,9 @@ class JobWorker:
             finally:
                 db.close()
 
+            if self._default_pipeline is None:
+                self._default_pipeline = production_inference_pipeline
+
             self._running = True
             self._thread = threading.Thread(target=self._worker_loop, daemon=True, name="JobWorkerThread")
             self._thread.start()
@@ -211,8 +214,149 @@ class JobWorker:
             db.close()
 
 
+def production_inference_pipeline(
+    job_id: str,
+    kind: str,
+    voice_id: Optional[str],
+    payload: Dict[str, Any],
+    job_dir: Path,
+) -> Dict[str, Any]:
+    """
+    Standard production inference pipeline dispatching to OpenVoice or RVC.
+
+    Args:
+        job_id (str): Unique job identifier token.
+        kind (str): Pipeline type ('tts', 'tts_custom', or 'vc').
+        voice_id (Optional[str]): Registered voice identifier slug.
+        payload (Dict[str, Any]): Job-specific parameters (text, language, speed, pitch_shift).
+        job_dir (Path): Dedicated temporary execution directory for this job.
+
+    Returns:
+        Dict[str, Any]: Execution metadata including duration, sample rate, and artifact paths.
+
+    Raises:
+        RuntimeError: If execution fails or required assets are missing.
+    """
+    logging.info(f"Executing production_inference_pipeline for job '{job_id}' (kind={kind})")
+    out_wav = job_dir / "output.wav"
+
+    if kind == "tts":
+        from core.services.pipelines.openvoice_service import OpenVoiceService
+        from core.services.audio.audio_service import AudioService
+        from core.cruds.voice_crud import VoiceCRUD
+        from core.database.database import SessionLocal
+
+        text = payload.get("text", "")
+        language = payload.get("language", "en")
+        speed = float(payload.get("speed", 1.0))
+
+        db = SessionLocal()
+        try:
+            voice = VoiceCRUD.get_voice_by_id(db, voice_id) if voice_id else None
+            if not voice:
+                raise RuntimeError(f"Voice '{voice_id}' not found in catalog.")
+            if voice.model_type != "openvoice_reference":
+                raise RuntimeError(f"Voice '{voice_id}' is not an OpenVoice reference model.")
+            
+            ref_path = (settings.voices_path / voice.asset_file).resolve()
+        finally:
+            db.close()
+
+        service = OpenVoiceService()
+        result = service.generate(
+            text=text,
+            reference_audio_path=str(ref_path),
+            output_path=str(out_wav),
+            speed=speed,
+            language=language,
+        )
+        AudioService.add_ai_label_metadata(out_wav)
+
+        return {
+            "format": "wav",
+            "duration_seconds": result.duration_seconds,
+            "sample_rate": result.sample_rate,
+            "language": language,
+            "ai_generated": True,
+        }
+
+    elif kind == "tts_custom":
+        from core.services.pipelines.openvoice_service import OpenVoiceService
+        from core.services.audio.audio_service import AudioService
+
+        text = payload.get("text", "")
+        language = payload.get("language", "en")
+        speed = float(payload.get("speed", 1.0))
+        ref_path = job_dir / "reference.wav"
+
+        if not ref_path.exists():
+            raise RuntimeError("Reference audio file missing in custom TTS job directory.")
+
+        service = OpenVoiceService()
+        result = service.generate(
+            text=text,
+            reference_audio_path=str(ref_path),
+            output_path=str(out_wav),
+            speed=speed,
+            language=language,
+        )
+        AudioService.add_ai_label_metadata(out_wav)
+
+        return {
+            "format": "wav",
+            "duration_seconds": result.duration_seconds,
+            "sample_rate": result.sample_rate,
+            "language": language,
+            "ai_generated": True,
+        }
+
+    elif kind == "vc":
+        from core.services.pipelines.rvc_service import RVCService
+        from core.services.audio.audio_service import AudioService
+        from core.cruds.voice_crud import VoiceCRUD
+        from core.database.database import SessionLocal
+
+        pitch_shift = int(payload.get("pitch_shift", 0))
+        src_path = job_dir / "source.wav"
+        if not src_path.exists():
+            raise RuntimeError("Source audio file missing in VC job directory.")
+
+        db = SessionLocal()
+        try:
+            voice = VoiceCRUD.get_voice_by_id(db, voice_id) if voice_id else None
+            if not voice:
+                raise RuntimeError(f"Voice '{voice_id}' not found in catalog.")
+            if voice.model_type != "rvc_model":
+                raise RuntimeError(f"Voice '{voice_id}' is not an RVC model.")
+            
+            model_path = (settings.voices_path / voice.asset_file).resolve()
+        finally:
+            db.close()
+
+        service = RVCService()
+        rvc_res = service.convert(
+            source_audio_path=str(src_path),
+            voice_model_path=str(model_path),
+            output_path=str(out_wav),
+            pitch_shift=pitch_shift,
+        )
+        AudioService.add_ai_label_metadata(out_wav)
+
+        return {
+            "format": "wav",
+            "duration_seconds": rvc_res.duration_seconds,
+            "sample_rate": rvc_res.sample_rate,
+            "pitch_shift": pitch_shift,
+            "ai_generated": True,
+        }
+
+    else:
+        raise ValueError(f"Unknown job kind: '{kind}'")
+
+
 # Process-wide singleton worker instance
 job_worker = JobWorker()
+
 
 
 if __name__ == "__main__":

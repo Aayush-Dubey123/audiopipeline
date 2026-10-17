@@ -201,3 +201,27 @@ class JobCRUD:
             db.rollback()
             logging.error(f"Error in JobCRUD.delete_job for job '{job_id}': {error}")
             raise error
+
+    @staticmethod
+    def count_active_jobs_for_client(db: Session, client_key: str) -> int:
+        """
+        Count active (queued or processing) jobs associated with a client key.
+
+        Args:
+            db (Session): Active database session.
+            client_key (str): Hashed client token.
+
+        Returns:
+            int: Number of currently active jobs.
+        """
+        logging.info("Executing JobCRUD.count_active_jobs_for_client")
+        try:
+            query = select(JobModel).where(
+                JobModel.client_key == client_key,
+                JobModel.status.in_(["queued", "processing"]),
+            )
+            return len(list(db.execute(query).scalars().all()))
+        except Exception as error:
+            logging.error(f"Error in JobCRUD.count_active_jobs_for_client: {error}")
+            return 0
+

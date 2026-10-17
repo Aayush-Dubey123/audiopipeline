@@ -45,3 +45,99 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
         return response
+
+
+import hashlib
+import time
+from collections import defaultdict
+from fastapi.responses import JSONResponse
+from core.config import get_settings
+
+settings = get_settings()
+
+
+def get_hashed_client_key(request: Request) -> str:
+    """
+    Generate an anonymous one-way cryptographic SHA-256 hash of the client's IP.
+
+    Guarantees that raw user IP addresses are never logged or stored.
+
+    Args:
+        request (Request): Inbound HTTP request.
+
+    Returns:
+        str: 16-character hexadecimal client hash token.
+    """
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        raw_ip = forwarded.split(",")[0].strip()
+    elif request.client and request.client.host:
+        raw_ip = request.client.host
+    else:
+        raw_ip = "127.0.0.1"
+
+    return hashlib.sha256(raw_ip.encode("utf-8")).hexdigest()[:16]
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    In-memory rate limiter enforcing sliding window request caps per hashed client IP.
+    """
+
+    def __init__(self, app, requests_per_minute: int = 30) -> None:
+        """
+        Initialize the rate limiter middleware.
+
+        Args:
+            app: ASGI application.
+            requests_per_minute (int): Maximum allowed requests in a rolling 60-second window.
+        """
+        super().__init__(app)
+        self.rpm = requests_per_minute
+        self._history: defaultdict = defaultdict(list)
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        """
+        Check rate limit before forwarding request to downstream handlers.
+
+        Args:
+            request (Request): Inbound HTTP request.
+            call_next (RequestResponseEndpoint): Downstream handler.
+
+        Returns:
+            Response: Response or HTTP 429 JSON response.
+        """
+        path = request.url.path
+        RATE_LIMITED_PATHS = {"/v1/tts", "/v1/tts/custom", "/v1/vc"}
+        if path not in RATE_LIMITED_PATHS:
+            return await call_next(request)
+
+        client_key = get_hashed_client_key(request)
+        now = time.time()
+        window = 60.0
+
+        # Purge timestamps outside the 60-second sliding window
+        self._history[client_key] = [t for t in self._history[client_key] if now - t < window]
+
+        # Enforce rate limit
+        limit = settings.RATE_LIMIT_PER_MINUTE if hasattr(settings, "RATE_LIMIT_PER_MINUTE") else self.rpm
+        if len(self._history[client_key]) >= limit:
+            oldest = self._history[client_key][0]
+            retry_after = max(1, int(window - (now - oldest)))
+            logging.warning(f"Rate limit exceeded for client hash '{client_key}' on {path}")
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "code": "429",
+                        "message": f"Rate limit exceeded. Please wait {retry_after} seconds before retrying.",
+                    }
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        self._history[client_key].append(now)
+        return await call_next(request)
+

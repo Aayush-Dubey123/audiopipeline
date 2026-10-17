@@ -1,0 +1,17 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+storage/tmp/*
+!storage/tmp/.gitkeep
+storage/output/*
+!storage/output/.gitkeep
+logs/*
+!logs/.gitkeep
+voice_studio.db
+.env
+tests

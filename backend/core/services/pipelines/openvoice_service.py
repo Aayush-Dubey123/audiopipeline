@@ -57,6 +57,67 @@ class GenerationResult:
     peak_vram_allocated_mb: float
     peak_vram_reserved_mb: float
     watermark_applied: bool
+    language: str = "en"
+
+
+HINGLISH_TO_DEVANAGARI_MAP = [
+    ("namaste", "नमस्ते"),
+    ("namaskar", "नमस्कार"),
+    ("dhanyawad", "धन्यवाद"),
+    ("dhanyavad", "धन्यवाद"),
+    ("shukriya", "शुक्रिया"),
+    ("kaise", "कैसे"),
+    ("kaisa", "कैसा"),
+    ("kaisi", "कैसी"),
+    ("hain", "हैं"),
+    ("hai", "है"),
+    ("hoon", "हूँ"),
+    ("aap", "आप"),
+    ("tum", "तुम"),
+    ("main", "मैं"),
+    ("hum", "हम"),
+    ("kya", "क्या"),
+    ("kyun", "क्यों"),
+    ("haan", "हाँ"),
+    ("nahi", "नहीं"),
+    ("nahin", "नहीं"),
+    ("theek", "ठीक"),
+    ("achha", "अच्छा"),
+    ("acha", "अच्छा"),
+    ("bahut", "बहुत"),
+    ("shubh", "शुभ"),
+    ("prabhat", "प्रभात"),
+    ("alvida", "अलविदा"),
+    ("dost", "दोस्त"),
+    ("swagat", "स्वागत"),
+    ("bharat", "भारत"),
+    ("india", "इंडिया"),
+]
+
+
+def transliterate_hinglish_to_devanagari(text: str) -> str:
+    """
+    Transliterate common romanized Hinglish/Marathi words to native Devanagari script.
+
+    Args:
+        text (str): Input text possibly in romanized script.
+
+    Returns:
+        str: Transliterated Devanagari script or original text if already Devanagari.
+    """
+    import re
+    if re.search(r"[\u0900-\u097f]", text):
+        return text
+
+    word_map = dict(HINGLISH_TO_DEVANAGARI_MAP)
+    words = re.findall(r"\b\w+\b|[^\w\s]", text.lower())
+    transliterated = []
+    for w in words:
+        if w in word_map:
+            transliterated.append(word_map[w])
+        else:
+            transliterated.append(w)
+    return " ".join(transliterated) if transliterated else text
 
 
 class OpenVoiceService:
@@ -117,6 +178,7 @@ class OpenVoiceService:
         # Lazy model instances and caches
         self._converter = None
         self._tts_model = None
+        self._mms_models: Dict[str, Tuple[Any, Any]] = {}
         self._source_se_cache: Dict[str, torch.Tensor] = {}
         self._target_se_cache: Dict[str, Tuple[float, torch.Tensor]] = {}
 
@@ -141,6 +203,7 @@ class OpenVoiceService:
         """
         self._converter = None
         self._tts_model = None
+        self._mms_models.clear()
         self._source_se_cache.clear()
         self._target_se_cache.clear()
         import gc
@@ -250,6 +313,45 @@ class OpenVoiceService:
             log.error("Failed to load MeloTTS model: %s", exc)
             raise OpenVoiceInferenceError(f"MeloTTS initialization failed: {exc}") from exc
 
+    def _load_mms_tts(self, language: str) -> Tuple[Any, Any]:
+        """
+        Lazily initialize and load the Meta MMS-TTS model and tokenizer for Hindi or Marathi.
+
+        Args:
+            language (str): Target language ISO code ('hi' or 'mr').
+
+        Returns:
+            Tuple[Any, Any]: Instantiated (VitsTokenizer, VitsModel).
+
+        Raises:
+            OpenVoiceInferenceError: If model loading fails.
+        """
+        lang = language.lower().strip()
+        if lang in self._mms_models:
+            return self._mms_models[lang]
+
+        if "cuda" in self.device:
+            try:
+                from core.services.pipelines.rvc_service import RVCService
+                RVCService.unload_all()
+            except Exception:
+                pass
+
+        model_name = "facebook/mms-tts-hin" if lang == "hi" else "facebook/mms-tts-mar"
+        try:
+            from transformers import VitsModel, VitsTokenizer
+
+            log.info("Loading MMS-TTS model '%s' on %s...", model_name, self.device)
+            tokenizer = VitsTokenizer.from_pretrained(model_name)
+            model = VitsModel.from_pretrained(model_name).to(self.device)
+            model.eval()
+            self._mms_models[lang] = (tokenizer, model)
+            log.info("MMS-TTS model '%s' successfully loaded.", model_name)
+            return self._mms_models[lang]
+        except Exception as exc:
+            log.error("Failed to load MMS-TTS model '%s': %s", model_name, exc)
+            raise OpenVoiceInferenceError(f"MMS-TTS ({language}) initialization failed: {exc}") from exc
+
     def get_source_speaker_embedding(self, speaker_key: str = "en-default.pth") -> torch.Tensor:
         """
         Load or retrieve cached source speaker embedding for base MeloTTS synthesis.
@@ -339,17 +441,21 @@ class OpenVoiceService:
         speaker_id: str = "EN-Default",
         speed: float = 1.0,
         tau: float = 0.3,
+        language: str = "en",
     ) -> GenerationResult:
         """
         Generate synthesized speech transferred to the tone of reference audio.
 
+        Supports multilingual engines: English (MeloTTS), Hindi (MMS-TTS), and Marathi (MMS-TTS).
+
         Args:
-            text (str): Script text to synthesize in English.
+            text (str): Script text to synthesize in English, Hindi, or Marathi.
             reference_audio_path (str): Filepath to reference audio WAV clip.
             output_path (str): Destination path for final converted WAV.
             speaker_id (str): Base MeloTTS speaker profile name ('EN-Default', 'EN-US', etc.).
             speed (float): Playback rate multiplier. Defaults to 1.0.
             tau (float): OpenVoice conversion temperature. Defaults to 0.3.
+            language (str): Target language ISO code ('en', 'hi', or 'mr'). Defaults to 'en'.
 
         Returns:
             GenerationResult: Comprehensive metrics and output file metadata.
@@ -357,11 +463,17 @@ class OpenVoiceService:
         Raises:
             ValueError: If text is empty or invalid.
             ReferenceAudioNotFoundError: If reference audio file does not exist.
-            OpenVoiceInferenceError: If synthesis or conversion fails.
+            OpenVoiceInferenceError: If synthesis, language engine, or conversion fails.
         """
         clean_text = text.strip()
         if not clean_text:
             raise ValueError("Input text cannot be empty or whitespace.")
+
+        lang = language.lower().strip()
+        if lang not in ("en", "hi", "mr"):
+            raise OpenVoiceInferenceError(
+                f"Unsupported language '{language}'. Supported languages: English ('en'), Hindi ('hi'), Marathi ('mr')."
+            )
 
         ref_file = Path(reference_audio_path).resolve()
         if not ref_file.exists():
@@ -394,31 +506,53 @@ class OpenVoiceService:
         temp_src_file = None
 
         try:
-            # 1. Base TTS Synthesis with MeloTTS
-            tts_model = self._load_tts()
-            spk_map = getattr(tts_model.hps.data, "spk2id", {})
-            try:
-                numeric_spk_id = spk_map[speaker_id]
-            except (KeyError, TypeError):
-                numeric_spk_id = getattr(spk_map, speaker_id, 0)
-
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 temp_src_file = tmp.name
 
             tts_start = time.time()
-            tts_model.tts_to_file(
-                clean_text,
-                numeric_spk_id,
-                temp_src_file,
-                speed=speed,
-                quiet=True,
-            )
-            base_tts_duration = time.time() - tts_start
-            log.info("MeloTTS base audio generated in %.2fs", base_tts_duration)
+
+            if lang in ("hi", "mr"):
+                # 1. Base TTS Synthesis with Meta MMS-TTS (Hindi / Marathi)
+                mms_tok, mms_model = self._load_mms_tts(lang)
+                effective_text = transliterate_hinglish_to_devanagari(clean_text)
+                inputs = mms_tok(effective_text, return_tensors="pt")
+                if inputs["input_ids"].shape[-1] == 0:
+                    raise OpenVoiceInferenceError(
+                        f"Input text does not contain valid {lang.upper()} Devanagari characters or recognizable romanized words."
+                    )
+                inputs = inputs.to(self.device)
+                with torch.no_grad():
+                    mms_out = mms_model(**inputs)
+                raw_wav = mms_out.waveform.squeeze().cpu().numpy()
+                sf.write(temp_src_file, raw_wav, 16000)
+                base_tts_duration = time.time() - tts_start
+                log.info("MMS-TTS base audio (%s) generated in %.2fs", lang, base_tts_duration)
+
+                converter = self._load_converter()
+                source_se = converter.extract_se(temp_src_file)
+            else:
+                # 1. Base TTS Synthesis with MeloTTS (English)
+                tts_model = self._load_tts()
+                spk_map = getattr(tts_model.hps.data, "spk2id", {})
+                try:
+                    numeric_spk_id = spk_map[speaker_id]
+                except (KeyError, TypeError):
+                    numeric_spk_id = getattr(spk_map, speaker_id, 0)
+
+                tts_model.tts_to_file(
+                    clean_text,
+                    numeric_spk_id,
+                    temp_src_file,
+                    speed=speed,
+                    quiet=True,
+                )
+                base_tts_duration = time.time() - tts_start
+                log.info("MeloTTS base audio generated in %.2fs", base_tts_duration)
+
+                converter = self._load_converter()
+                source_se = self.get_source_speaker_embedding("en-default.pth")
 
             # 2. Extract / Retrieve Speaker Embeddings
-            converter = self._load_converter()
-            source_se = self.get_source_speaker_embedding("en-default.pth")
             target_se = self.extract_target_speaker_embedding(str(ref_file))
 
             # 3. Tone Color Conversion
@@ -468,6 +602,7 @@ class OpenVoiceService:
                 peak_vram_allocated_mb=peak_vram_alloc,
                 peak_vram_reserved_mb=peak_vram_res,
                 watermark_applied=self.enable_watermark,
+                language=lang,
             )
 
         except (ModelCheckpointNotFoundError, ReferenceAudioNotFoundError, ValueError):
@@ -496,14 +631,26 @@ def main() -> None:
     """
     CLI execution entry point for standalone verification and benchmarking.
     """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(
-        description="AI Voice Studio: OpenVoice V2 + MeloTTS CLI Inference Harness"
+        description="AI Voice Studio: OpenVoice V2 + Multilingual TTS CLI Harness"
     )
     parser.add_argument(
         "--text",
         type=str,
         default="This is an automated verification test for OpenVoice V2 voice cloning.",
         help="Text script to synthesize",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default="en",
+        help="Language code ('en', 'hi', or 'mr')",
     )
     parser.add_argument(
         "--reference",
@@ -549,9 +696,10 @@ def main() -> None:
         out_path = service.backend_dir / out_path
 
     print("=" * 60)
-    print("AI Voice Studio - OpenVoice V2 Inference Test")
+    print("AI Voice Studio - OpenVoice V2 Multilingual Inference Test")
     print("=" * 60)
     print(f"Device:           {service.device}")
+    print(f"Language:         {args.language}")
     print(f"Input text:       {args.text}")
     print(f"Reference audio:  {ref_path}")
     print(f"Output path:      {out_path}")
@@ -566,6 +714,7 @@ def main() -> None:
             output_path=str(out_path),
             speed=args.speed,
             tau=args.tau,
+            language=args.language,
         )
         print("RESULT: SUCCESS")
         print(f"Generated Audio Duration: {result.duration_seconds:.2f}s")

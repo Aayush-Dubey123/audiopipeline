@@ -1,20 +1,220 @@
 """
-HTTP routes for asynchronous job lifecycle polling and audio artifact streaming.
+HTTP routes for inference job creation, status polling, and audio artifact streaming.
 """
 
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from core import logger
 from core.database.database import get_db
 from core.controllers.job_controller import JobController
-from core.apis.schemas.responses.job_responses import JobStatusResponse, JobDeleteResponse
+from core.apis.middleware import get_hashed_client_key
+from core.apis.schemas.requests.job_requests import TTSJobRequest, TextCleanupRequest
+from core.apis.schemas.responses.job_responses import (
+    JobCreatedResponse,
+    JobStatusResponse,
+    JobDeleteResponse,
+    TextCleanupResponse,
+)
 
 logging = logger(__name__)
 
 router = APIRouter(tags=["Inference Jobs & Audio"])
+
+
+@router.post(
+    "/tts",
+    response_model=JobCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Create Text-to-Speech Job",
+    description="Submits a script for asynchronous speech synthesis using a registered voice.",
+)
+def create_tts(
+    request: TTSJobRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+) -> JobCreatedResponse:
+    """
+    Handle POST /v1/tts endpoint requests.
+
+    Args:
+        request (TTSJobRequest): Validated text and voice parameters.
+        http_request (Request): Inbound HTTP request for client IP hashing.
+        db (Session): Database session dependency.
+
+    Returns:
+        JobCreatedResponse: Queued job token and status confirmation.
+
+    Raises:
+        HTTPException 400: If voice or language constraints are violated.
+        HTTPException 404: If voice does not exist.
+        HTTPException 429: If queue is full or active job quota is reached.
+        HTTPException 500: If unexpected server error occurs.
+    """
+    logging.info("Calling POST /v1/tts endpoint")
+    try:
+        client_key = get_hashed_client_key(http_request)
+        return JobController.create_tts_job(db=db, client_key=client_key, request=request)
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/tts endpoint: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/tts endpoint: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+
+
+@router.post(
+    "/tts/custom",
+    response_model=JobCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Create Custom Reference Voice TTS Job",
+    description="Synthesizes speech cloned from a user-supplied reference audio recording.",
+)
+async def create_custom_tts(
+    http_request: Request,
+    text: str = Form(..., description="Script text to synthesize"),
+    language: str = Form("en", description="Target language ('en', 'hi', or 'mr')"),
+    speed: float = Form(1.0, description="Speech rate multiplier (0.5 to 2.0)"),
+    consent: bool = Form(..., description="Verification of voice ownership or authorization"),
+    file: UploadFile = File(..., description="Reference audio recording file"),
+    db: Session = Depends(get_db),
+) -> JobCreatedResponse:
+    """
+    Handle POST /v1/tts/custom multipart endpoint requests.
+
+    Args:
+        http_request (Request): Inbound HTTP request.
+        text (str): Script text from form body.
+        language (str): Language code.
+        speed (float): Playback speed.
+        consent (bool): Explicit voice cloning consent.
+        file (UploadFile): Audio reference file upload.
+        db (Session): Database session dependency.
+
+    Returns:
+        JobCreatedResponse: Queued job metadata.
+
+    Raises:
+        HTTPException 400: If consent is missing, audio fails quality inspection, or parameters invalid.
+        HTTPException 429: If queue is full or per-client quota is reached.
+        HTTPException 500: If unexpected internal error occurs.
+    """
+    logging.info("Calling POST /v1/tts/custom endpoint")
+    try:
+        client_key = get_hashed_client_key(http_request)
+        return await JobController.create_custom_tts_job(
+            db=db,
+            client_key=client_key,
+            text=text,
+            language=language,
+            speed=speed,
+            consent=consent,
+            file=file,
+        )
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/tts/custom endpoint: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/tts/custom endpoint: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+
+
+@router.post(
+    "/vc",
+    response_model=JobCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Create Voice Conversion Job",
+    description="Converts uploaded source audio into a target RVC voice model.",
+)
+async def create_vc(
+    http_request: Request,
+    voice_id: str = Form(..., description="Target RVC voice identifier slug"),
+    pitch_shift: int = Form(0, description="Pitch modification in semitones (-12 to +12)"),
+    file: UploadFile = File(..., description="Source speech audio file to convert"),
+    db: Session = Depends(get_db),
+) -> JobCreatedResponse:
+    """
+    Handle POST /v1/vc multipart endpoint requests.
+
+    Args:
+        http_request (Request): Inbound HTTP request.
+        voice_id (str): Target voice profile identifier.
+        pitch_shift (int): Pitch shift in semitones.
+        file (UploadFile): Audio file to convert.
+        db (Session): Database session dependency.
+
+    Returns:
+        JobCreatedResponse: Queued conversion job envelope.
+
+    Raises:
+        HTTPException 400: If voice model or audio upload parameters are invalid.
+        HTTPException 404: If target voice is not found.
+        HTTPException 429: If queue is full or quota exceeded.
+        HTTPException 500: If unexpected internal failure occurs.
+    """
+    logging.info(f"Calling POST /v1/vc endpoint for voice '{voice_id}'")
+    try:
+        client_key = get_hashed_client_key(http_request)
+        return await JobController.create_vc_job(
+            db=db,
+            client_key=client_key,
+            voice_id=voice_id,
+            pitch_shift=pitch_shift,
+            file=file,
+        )
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/vc endpoint: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/vc endpoint: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+
+
+@router.post(
+    "/text/cleanup",
+    response_model=TextCleanupResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Enhance and Clean Script Text",
+    description="Expands abbreviations, normalizes numbers, and cleans punctuation for optimal synthesis.",
+)
+def cleanup_text(
+    request: TextCleanupRequest,
+) -> TextCleanupResponse:
+    """
+    Handle POST /v1/text/cleanup endpoint requests.
+
+    Args:
+        request (TextCleanupRequest): Input text and target language parameters.
+
+    Returns:
+        TextCleanupResponse: Enhanced script text.
+
+    Raises:
+        HTTPException 500: If text cleaning encounters unexpected error.
+    """
+    logging.info("Calling POST /v1/text/cleanup endpoint")
+    try:
+        return JobController.cleanup_text(request=request)
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/text/cleanup endpoint: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/text/cleanup endpoint: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
 
 
 @router.get(
