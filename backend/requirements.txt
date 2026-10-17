@@ -1,21 +1,19 @@
 # Web Framework & ASGI Server
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
 
-# Data Validation
-pydantic>=2.9.0
-email-validator>=2.0.0
-python-multipart>=0.0.12
+# Data Validation & Settings
+pydantic==2.10.6
+pydantic-settings==2.7.1
+python-multipart==0.0.20
 
-# Database & ODM (MongoDB)
-motor>=3.7.0
-pymongo>=4.10.0
-odmantic>=1.0.2
+# Database (SQLAlchemy SQLite)
+sqlalchemy==2.0.38
 
-# Security & Authentication
-PyJWT>=2.9.0
-passlib[bcrypt]>=1.7.4
-bcrypt>=4.0.1
+# Audio Processing Utilities (Probe, Resample, Convert)
+soundfile==0.13.1
+librosa==0.10.2.post1
 
-# Environment & Utilities
-python-dotenv>=1.0.1
+# Testing & HTTP Client
+pytest==8.3.4
+httpx==0.28.1

@@ -15,12 +15,16 @@ This document serves as the permanent, static anchor for all AI agent operations
 3. **Frontend Freeze:** Frontend implementation is **STRICTLY DEFERRED**. Never generate, scaffold, or modify frontend code until the user explicitly issues a command to begin frontend development.
 4. **Zero Vulnerabilities & Security-by-Default:** No hardcoded secrets, raw credentials, unvalidated inputs, unmasked stack traces, or unsanitized queries are permitted. Every line of code must be production-ready.
 5. **No Premature Git Operations:** Never execute `git commit` or `git push` unless explicitly ordered by the user.
+6. **Strict Two-File Folder Limit (Executable Code):** Throughout development, every parent folder must only contain at most 2 child executable code files (e.g., `.py`, `.jsx`, `.tsx`; no more than 2 code files may be created or worked on per parent folder; just the parent folder, 2 subsequent code files, and all implementation is written strictly within them). Project documentation (`README.md`, `progress.md`) and git directory anchors (`.gitkeep`) are strictly exempt metadata.
+7. **Universal Stack Standard Compliance:** Whatever the stack may be (`.py`, `.jsx`, `.tsx`, etc.), the folder structure, architectural layering, and code implementation must strictly adhere to the standards defined in [code-standards](file:///c:/Users/aayus/universal/code-standards) ([code-standards/backend-standards](file:///c:/Users/aayus/universal/code-standards/backend-standards) for backend and [code-standards/frontend-standards](file:///c:/Users/aayus/universal/code-standards/frontend-standards) for frontend).
 
 ---
 
 ## 2. Anchor 1: Mandatory Code Standards (`code-standards`)
 
-Every line of backend code written in `backend/` must strictly conform to the conventions defined in [code-standards/backend-standards](file:///c:/Users/aayus/universal/code-standards/backend-standards).
+Whatever the stack may be (`.py`, `.jsx`, `.tsx`, etc.), every folder structure, architectural layer, and line of code must strictly conform to the conventions defined in [code-standards](file:///c:/Users/aayus/universal/code-standards):
+- **Backend (`.py`):** Strictly follow [code-standards/backend-standards](file:///c:/Users/aayus/universal/code-standards/backend-standards).
+- **Frontend (`.jsx`, `.tsx`):** Strictly follow [code-standards/frontend-standards](file:///c:/Users/aayus/universal/code-standards/frontend-standards) when triggered.
 
 ### 2.1 The 4-Layer Flow
 All API features must strictly follow this unidirectional flow:
@@ -131,7 +135,7 @@ Always execute work according to the 5-step methodology:
 
 ## 4. Anchor 3: Canonical Backend Prebuilt Structure
 
-The backend structure below is the **canonical architectural foundation**. All backend code must reside within this prebuilt structure. Do not introduce alternative folder structures unless explicitly requested.
+The backend structure below is the **canonical architectural foundation**. All backend code must reside within this prebuilt structure. Do not introduce alternative folder structures unless explicitly requested. Throughout development, every parent folder should only contain 2 child executable code files (e.g., `.py` files; no more than 2 code files created or worked on per parent folder), with project documentation (`README.md`, `progress.md`) and git anchors (`.gitkeep`) exempt as metadata.
 
 ```text
 c:\Users\aayus\universal\backend/
@@ -207,3 +211,7 @@ When the user explicitly issues a command to build the frontend, activate the fo
 - Layering: `route/page -> feature component -> shared UI/hooks -> API client -> backend API`.
 - Design & Aesthetics: Activate [.agents/skills/impeccable](file:///c:/Users/aayus/universal/.agents/skills/impeccable) and [.agents/skills/web-design-guidelines](file:///c:/Users/aayus/universal/.agents/skills/web-design-guidelines).
 - State & Boundaries: Typed API clients in `lib/api`, centralized environment variable configuration, accessibility, responsive UI, zero hardcoded backend URLs.
+
+HARDWARE: Windows 11 laptop, NVIDIA RTX 3050 6GB VRAM, 16GB RAM, i5-12450HX. Use the CUDA build of PyTorch.
+Keep GPU memory under ~5GB: load only one heavy model on the GPU at a time (OpenVoice OR RVC), use fp16 where safe,
+and free GPU memory between jobs. Always support a CPU fallback.

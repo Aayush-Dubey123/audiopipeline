@@ -67,3 +67,24 @@ ehthumbs.db
 *.swp
 *.swo
 
+# Temporary job storage & audio uploads/outputs
+backend/storage/
+storage/
+
+# AI voice models, weights, indexes, and checkpoints
+backend/voices/**/*.pth
+backend/voices/**/*.index
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.onnx
+checkpoints/
+
+# Raw and generated audio working files
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+
