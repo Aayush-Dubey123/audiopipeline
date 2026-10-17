@@ -80,6 +80,7 @@ backend/voices/**/*.index
 *.safetensors
 *.onnx
 checkpoints/
+backend/voices/checkpoints_v2/
 
 # Raw and generated audio working files
 *.wav

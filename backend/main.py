@@ -1,38 +1,32 @@
 """
-ASGI Application Entrypoint.
+ASGI application entrypoint.
 
-Starts the Uvicorn web server and manages runtime environment initialization.
+Initializes configuration and binds the Uvicorn web server instance.
 """
 
-import os
 import uvicorn
-from dotenv import load_dotenv
-
-# Load local environment configuration
-load_dotenv()
+from core.config import get_settings
 
 
 def run_server() -> None:
     """
     Launch the ASGI server instance with environment-aware configurations.
 
-    Reads host, port, and reload options from the environment and binds Uvicorn.
+    Retrieves host and port settings from centralized configuration and binds Uvicorn.
 
     Returns:
         None
 
     Raises:
-        Exception: If the server fails to bind or encountered runtime termination.
+        Exception: If the server fails to bind or encounters a fatal runtime failure.
     """
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "8000"))
-    environment = os.getenv("ENVIRONMENT", "development").lower()
-    is_development = environment == "development"
+    settings = get_settings()
+    is_development = settings.ENV.lower() == "development"
 
     uvicorn.run(
         "core.apis.api:app",
-        host=host,
-        port=port,
+        host="0.0.0.0",
+        port=8000,
         reload=is_development,
         server_header=False,
     )
