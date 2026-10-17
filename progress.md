@@ -113,7 +113,7 @@ backend/
 | 11 | Optional language helpers | `POST /v1/text/cleanup`, fully optional | ☑ |
 | 12 | Tests & backend audit | Test suite (51/51 passing), README update, Definition-of-Done audit | ☑ |
 | 13 | Deployment preparation | Dockerfile, .dockerignore, prod config, hosting docs | ☑ |
-| F | Frontend | Modern React/Next.js UI, Studio, Audio player, Polling | 🚀 In Progress |
+| F | Frontend | Modern React/Next.js UI, Studio, Audio player, Polling | ☑ |
 
 **Golden rule:** one reliable end-to-end workflow first (Phases 0 → 7), then expand.
 
@@ -654,8 +654,9 @@ error handling, no secrets, 2-code-files-per-folder. List violations and fix the
 | 2026-10-17 | 11    | DONE   | POST /v1/text/cleanup with rule-based abbreviations, numbers, and currencies. |
 | 2026-10-17 | 12    | DONE   | Comprehensive test suite: 51/51 tests passing across test_api and test_services. |
 | 2026-10-17 | 13    | DONE   | Dockerfile with FFmpeg & non-root user, .dockerignore, local run docs. |
+| 2026-10-17 | F     | DONE   | Vite + React 19 + TypeScript dark glassmorphism studio, audio waveform player, live polling, 2-file folder compliance. |
 
-**Current phase:** F (Frontend)
+**Current phase:** All Phases (0–13 + F) Complete
 **Blockers:** none
 
 ---
