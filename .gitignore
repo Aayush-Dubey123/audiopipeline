@@ -90,3 +90,8 @@ backend/voices/rvc_models/
 *.ogg
 *.m4a
 
+# Keep official voice library reference and preview assets
+!backend/voices/reference/my_voice.wav
+!backend/voices/previews/my_voice_preview.wav
+
+
