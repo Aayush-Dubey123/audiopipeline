@@ -64,6 +64,8 @@ class OpenVoiceService:
     Inference service managing MeloTTS base synthesis and OpenVoice V2 tone conversion.
     """
 
+    _instances: set = set()
+
     def __init__(
         self,
         converter_dir: Optional[str] = None,
@@ -118,12 +120,52 @@ class OpenVoiceService:
         self._source_se_cache: Dict[str, torch.Tensor] = {}
         self._target_se_cache: Dict[str, Tuple[float, torch.Tensor]] = {}
 
+        OpenVoiceService._instances.add(self)
+
         log.info(
             "Initialized OpenVoiceService on device '%s' (converter_dir: %s, watermark: %s)",
             self.device,
             self.converter_dir,
             self.enable_watermark,
         )
+
+    def unload_models(self) -> None:
+        """
+        Unload neural network models from GPU memory and invoke garbage collection.
+
+        Returns:
+            None
+
+        Raises:
+            None
+        """
+        self._converter = None
+        self._tts_model = None
+        self._source_se_cache.clear()
+        self._target_se_cache.clear()
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        log.info("OpenVoice models successfully unloaded from memory.")
+
+    @classmethod
+    def unload_all(cls) -> None:
+        """
+        Unload all cached OpenVoice models across any active instances.
+
+        Returns:
+            None
+
+        Raises:
+            None
+        """
+        for instance in list(cls._instances):
+            instance.unload_models()
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _load_converter(self) -> Any:
         """
@@ -150,6 +192,13 @@ class OpenVoiceService:
             raise ModelCheckpointNotFoundError(
                 f"ToneColorConverter checkpoint not found at: {checkpoint_path}"
             )
+
+        if "cuda" in self.device:
+            try:
+                from core.services.pipelines.rvc_service import RVCService
+                RVCService.unload_all()
+            except Exception:
+                pass
 
         try:
             from openvoice.api import ToneColorConverter
@@ -181,6 +230,13 @@ class OpenVoiceService:
         """
         if self._tts_model is not None:
             return self._tts_model
+
+        if "cuda" in self.device:
+            try:
+                from core.services.pipelines.rvc_service import RVCService
+                RVCService.unload_all()
+            except Exception:
+                pass
 
         try:
             from melo.api import TTS
@@ -216,7 +272,7 @@ class OpenVoiceService:
                 f"Base speaker embedding not found at: {se_path}"
             )
 
-        embedding = torch.load(str(se_path), map_location=self.device)
+        embedding = torch.load(str(se_path), map_location=self.device, weights_only=True)
         self._source_se_cache[speaker_key] = embedding
         return embedding
 
@@ -258,7 +314,7 @@ class OpenVoiceService:
         if cache_on_disk and disk_cache_path.exists():
             if disk_cache_path.stat().st_mtime >= current_mtime:
                 log.info("Loading cached target speaker embedding from: %s", disk_cache_path.name)
-                tensor = torch.load(str(disk_cache_path), map_location=self.device)
+                tensor = torch.load(str(disk_cache_path), map_location=self.device, weights_only=True)
                 self._target_se_cache[cache_key] = (current_mtime, tensor)
                 return tensor
 
@@ -313,7 +369,10 @@ class OpenVoiceService:
                 f"Reference audio file does not exist: {reference_audio_path}"
             )
 
-        out_file = Path(output_path).resolve()
+        out_file = Path(output_path)
+        if not out_file.is_absolute():
+            out_file = self.backend_dir / out_file
+        out_file = out_file.resolve()
         out_file.parent.mkdir(parents=True, exist_ok=True)
 
         # Upfront validation of checkpoint files

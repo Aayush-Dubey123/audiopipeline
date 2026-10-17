@@ -233,6 +233,31 @@ Build the AI pipelines first, then connect them to a polished interface. Do not 
 
 The immediate goal is one reliable end-to-end voice-generation workflow. Once that works, expand the platform incrementally without compromising reliability, privacy, or the free-to-use objective.
 
+## 11. Third-Party Licenses and Attributions
+
+AI Voice Studio builds upon foundational open-source neural synthesis and voice conversion research. We gratefully acknowledge and credit the following upstream projects and authors:
+
+- **Applio** ([IAHispano/Applio](https://github.com/IAHispano/Applio)):
+  - License: MIT License
+  - Authors: Copyright (c) 2023-2026 AI Hispano / Applio Team
+  - Contribution: Modular RVC architecture, Neural Source Filter (NSF) vocoder, and RMVPE predictor implementation.
+- **Retrieval-based Voice Conversion (RVC)** ([RVC-Project/Retrieval-based-Voice-Conversion-WebUI](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI)):
+  - License: MIT License
+  - Authors: Copyright (c) 2023 RVC-Project
+  - Contribution: VITS-based acoustic conversion, HuBERT/ContentVec feature representation, and pitch tracking.
+- **OpenVoice V2** ([myshell-ai/OpenVoice](https://github.com/myshell-ai/OpenVoice)):
+  - License: MIT License
+  - Authors: Copyright (c) 2024 MyShell AI
+  - Contribution: Instant zero-shot tone color converter and speaker embedding extraction algorithms.
+- **MeloTTS** ([myshell-ai/MeloTTS](https://github.com/myshell-ai/MeloTTS)):
+  - License: MIT License
+  - Authors: Copyright (c) 2024 MyShell AI
+  - Contribution: High-speed multi-lingual base text-to-speech synthesis models.
+- **ContentVec** ([lengyue/contentvec](https://huggingface.co/lengyue/contentvec) / [auspicious3000/contentvec](https://github.com/auspicious3000/contentvec)):
+  - License: MIT License / Apache 2.0
+  - Authors: Copyright (c) 2022 ContentVec Authors
+  - Contribution: Disentangled acoustic speech representation model used for phonemic feature extraction.
+
 ## 0. Global Rules for the IDE :
 
 ```text

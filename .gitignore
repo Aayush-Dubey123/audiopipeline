@@ -81,6 +81,7 @@ backend/voices/**/*.index
 *.onnx
 checkpoints/
 backend/voices/checkpoints_v2/
+backend/voices/rvc_models/
 
 # Raw and generated audio working files
 *.wav

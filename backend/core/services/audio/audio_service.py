@@ -353,7 +353,8 @@ if __name__ == "__main__":
     and exports MP3 with AI metadata tags to storage/tmp.
     """
     print("=== Running AudioService Self-Check Harness ===")
-    tmp_dir = Path("storage/tmp")
+    from core.config import get_settings
+    tmp_dir = get_settings().tmp_path
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Synthesize 1-second 440 Hz test tone at 22050 Hz

@@ -5,6 +5,7 @@ Loads validated environment configurations from .env using Pydantic Settings.
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -69,6 +70,43 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = Field(default="", description="Optional Groq API key")
     GEMINI_API_KEY: str = Field(default="", description="Optional Gemini API key")
     OPENROUTER_API_KEY: str = Field(default="", description="Optional OpenRouter API key")
+
+    EXPOSE_EXPERIMENTAL_VOICES: bool = Field(
+        default=False,
+        description="Whether experimental voice entries are exposed in public endpoints",
+    )
+
+    @property
+    def backend_dir(self) -> Path:
+        """
+        Absolute Path to the backend root directory.
+
+        Returns:
+            Path: Backend directory path.
+        """
+        return Path(__file__).resolve().parent.parent
+
+    @property
+    def tmp_path(self) -> Path:
+        """
+        Absolute Path to the temporary storage directory inside backend.
+
+        Returns:
+            Path: Resolved tmp directory path.
+        """
+        p = Path(self.TMP_DIR)
+        return p if p.is_absolute() else (self.backend_dir / p)
+
+    @property
+    def voices_path(self) -> Path:
+        """
+        Absolute Path to the voices directory inside backend.
+
+        Returns:
+            Path: Resolved voices directory path.
+        """
+        p = Path(self.VOICES_DIR)
+        return p if p.is_absolute() else (self.backend_dir / p)
 
     @property
     def cors_origins_list(self) -> List[str]:

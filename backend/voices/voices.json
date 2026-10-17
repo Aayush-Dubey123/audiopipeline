@@ -1,0 +1,35 @@
+[
+  {
+    "id": "my_voice",
+    "name": "My Voice",
+    "description": "Operator reference voice for speech synthesis",
+    "style": "conversational",
+    "languages": [
+      "en"
+    ],
+    "model_type": "openvoice_reference",
+    "preview_file": "previews/my_voice_preview.wav",
+    "asset_file": "reference/my_voice.wav",
+    "license": "Owner's own voice, recorded and provided by the operator",
+    "usage_permission": "Authorized by operator for local studio synthesis",
+    "status": "available",
+    "limitations": "English only; optimized for clean conversational speech."
+  },
+  {
+    "id": "nttsai",
+    "name": "NttsAI",
+    "description": "Experimental RVC voice conversion model",
+    "style": "anime",
+    "languages": [
+      "en",
+      "ja"
+    ],
+    "model_type": "rvc_model",
+    "preview_file": null,
+    "asset_file": "rvc_models/checkpoints/NttsAI.pth",
+    "license": "Apache 2.0 (unverified training provenance)",
+    "usage_permission": "Local experimental research only; not for public release or commercial use",
+    "status": "experimental",
+    "limitations": "Experimental checkpoint with unverified training dataset; sensitive to input pitch."
+  }
+]

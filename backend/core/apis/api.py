@@ -16,6 +16,8 @@ from core.config import get_settings
 from core.database.database import init_db
 from core.apis.middleware import SecurityHeadersMiddleware
 from core.apis.routes.catalog_routes import router as catalog_router
+from core.apis.routes.job_routes import router as job_router
+from core.services.jobs.job_worker import job_worker
 
 logging = logger(__name__)
 settings = get_settings()
@@ -38,14 +40,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         Exception: If database synchronization or initialization fails.
     """
     logging.info(f"Starting AI Voice Studio backend (ENV={settings.ENV}, DEBUG={settings.DEBUG})")
+    
+    # Startup self-check: EXPOSE_EXPERIMENTAL_VOICES must be False in production
+    if settings.ENV.lower() == "production" and settings.EXPOSE_EXPERIMENTAL_VOICES:
+        logging.critical("Startup check failed: EXPOSE_EXPERIMENTAL_VOICES cannot be enabled in production")
+        raise RuntimeError("Startup self-check failed: EXPOSE_EXPERIMENTAL_VOICES must be False in production.")
+
     try:
         init_db()
     except Exception as error:
         logging.error(f"Failed to initialize database on startup: {error}")
         raise error
 
+    # Idempotent voice catalog synchronization
+    from core.database.database import SessionLocal
+    from core.cruds.voice_crud import VoiceCRUD
+
+    db = SessionLocal()
+    try:
+        manifest_path = settings.voices_path / "voices.json"
+        synced_count = VoiceCRUD.sync_voices_from_json(
+            db=db,
+            json_path=manifest_path,
+            voices_base_dir=settings.voices_path,
+        )
+        logging.info(f"Startup voice sync complete: {synced_count} voice(s) loaded")
+    except Exception as sync_err:
+        logging.warning(f"Voice catalog synchronization encountered an error: {sync_err}")
+    finally:
+        db.close()
+
+    # Start the single-worker background inference queue
+    job_worker.start()
+
     yield
 
+    # Cleanly stop background worker
+    job_worker.stop()
     logging.info("Shutting down AI Voice Studio backend cleanly")
 
 
@@ -167,6 +198,7 @@ def create_app() -> FastAPI:
 
     # 4. Mount API v1 routers
     application.include_router(catalog_router, prefix="/v1")
+    application.include_router(job_router, prefix="/v1")
 
     return application
 
