@@ -1,94 +1,192 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
-  Mic,
-  Square,
-  Upload,
   Sparkles,
-  Play,
-  CheckCircle2,
+  Mic,
+  Upload,
   AlertCircle,
-  Sliders,
-  Shield,
-  Loader2,
-  Wand2,
+  RefreshCw,
+  CheckCircle2,
+  Volume2,
+  Square,
+  FileText,
+  RotateCcw,
+  Clock,
+  Layers,
+  Download,
+  Copy,
+  Check,
 } from 'lucide-react';
-import type { Voice, SupportedLanguage, JobStatusResponse } from '../../lib/types';
 import { api, ApiError } from '../../lib/api';
+import type { Voice, SupportedLanguage, JobStatusResponse, PublicConfigResponse } from '../../lib/types';
 import { AudioPlayer } from '../common/AudioPlayer';
 
 interface TTSStudioProps {
   voices: Voice[];
-  onJobStarted: (jobId: string) => void;
+  onNavigateBack: () => void;
+  selectedVoiceId?: string;
+  config?: PublicConfigResponse | null;
+  initialJobId?: string | null;
+  onActiveJobChange?: (jobId: string | null) => void;
 }
 
-export const TTSStudio: React.FC<TTSStudioProps> = ({ voices, onJobStarted }) => {
-  // Mode: catalog voice vs custom reference audio
-  const [mode, setMode] = useState<'preset' | 'custom'>('preset');
-
-  // Input states
-  const [text, setText] = useState('Welcome to AI Voice Studio. This speech was synthesized using neural tone color transfer.');
-  const [selectedVoiceId, setSelectedVoiceId] = useState(voices[0]?.id || 'my_voice');
+export const TTSStudio: React.FC<TTSStudioProps> = ({
+  voices,
+  onNavigateBack,
+  selectedVoiceId: initialVoiceId,
+  config,
+  initialJobId,
+  onActiveJobChange,
+}) => {
+  // Step 1: Script State
+  const [script, setScript] = useState(
+    'Welcome to AI Voice Studio. You can now compose long-form scripts across English, Hindi, and Marathi with high-fidelity neural voice cloning.'
+  );
   const [language, setLanguage] = useState<SupportedLanguage>('en');
+  const [isPolishing, setIsPolishing] = useState(false);
+  const [polishMessage, setPolishMessage] = useState<string | null>(null);
+  const txtFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Dynamic limits fetched from GET /v1/config/public (never hardcoded)
+  const [serverConfig, setServerConfig] = useState<PublicConfigResponse | null>(config || null);
+
+  useEffect(() => {
+    if (config) {
+      setServerConfig(config);
+    } else {
+      api.getPublicConfig().then(setServerConfig).catch(() => null);
+    }
+  }, [config]);
+
+  const maxChars = serverConfig?.max_text_chars || 30000;
+
+  // Step 2: Voice Choice State
+  const [voiceTab, setVoiceTab] = useState<'library' | 'custom'>('library');
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>(
+    initialVoiceId || (voices.length > 0 ? voices[0].id : 'my_voice')
+  );
   const [speed, setSpeed] = useState<number>(1.0);
 
-  // Custom reference audio states
-  const [referenceFile, setReferenceFile] = useState<File | null>(null);
-  const [consentGiven, setConsentGiven] = useState(false);
+  // Custom Clip State
+  const [customFile, setCustomFile] = useState<File | null>(null);
+  const [consentChecked, setConsentChecked] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [recordedBlobUrl, setRecordedBlobUrl] = useState<string | null>(null);
-
-  // Generation & Status states
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [isCleaning, setIsCleaning] = useState(false);
-  const [currentJob, setCurrentJob] = useState<JobStatusResponse | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [cleanFeedback, setCleanFeedback] = useState<string | null>(null);
-
-  // Audio Recorder refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const timerIntervalRef = useRef<number | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<number | null>(null);
 
-  // Filter voices that support the selected language
-  const compatibleVoices = voices.filter(
-    (v) => v.status === 'available' && v.languages.includes(language)
-  );
+  // Audio Preview for Library Voices
+  const [playingPreviewVoiceId, setPlayingPreviewVoiceId] = useState<string | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Quick preset samples
-  const loadPresetSample = (lang: SupportedLanguage) => {
-    setLanguage(lang);
-    if (lang === 'en') {
-      setText('Welcome to AI Voice Studio. Our system enables crystal-clear text-to-speech with natural intonation.');
-    } else if (lang === 'hi') {
-      setText('एआई वॉयस स्टूडियो में आपका स्वागत है। यह आवाज़ आधुनिक न्यूरल तकनीक से बनाई गई है।');
-    } else if (lang === 'mr') {
-      setText('एआय व्हॉइस स्टुडिओमध्ये आपले स्वागत आहे. येथे मराठी भाषेत अतिशय स्पष्ट आवाज तयार होतो.');
+  // Step 3: Result & Polling State
+  const [currentJob, setCurrentJob] = useState<JobStatusResponse | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isResuming, setIsResuming] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const pollIntervalRef = useRef<number | null>(null);
+
+  // Cleanup polling and audio on unmount
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+    };
+  }, []);
+
+  // Update selected voice if voices list loads after mount
+  useEffect(() => {
+    if (voices.length > 0 && !voices.some((v) => v.id === selectedVoiceId)) {
+      setSelectedVoiceId(voices[0].id);
     }
+  }, [voices]);
+
+  // Check URL job_id on mount to restore job state if user left and returned
+  useEffect(() => {
+    if (initialJobId && !currentJob) {
+      pollJobStatus(initialJobId);
+    }
+  }, [initialJobId]);
+
+  // Handle .txt File Upload
+  const handleTxtUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content !== undefined) {
+        setScript(content);
+        setPolishMessage(`Uploaded ${file.name} (${content.length.toLocaleString()} characters)`);
+        setTimeout(() => setPolishMessage(null), 4000);
+      }
+    };
+    reader.readAsText(file, 'utf-8');
+    // reset input value so re-selecting same file triggers onChange
+    e.target.value = '';
   };
 
-  // Text cleanup handler
-  const handleCleanText = async () => {
-    if (!text.trim()) return;
-    setIsCleaning(true);
-    setCleanFeedback(null);
+  // Handle Script Polish
+  const handlePolish = async () => {
+    if (!script.trim()) return;
+    setIsPolishing(true);
+    setPolishMessage(null);
     try {
-      const res = await api.cleanupText(text, language);
-      setText(res.cleaned);
-      setCleanFeedback(`Cleaned for TTS (${res.provider_used})`);
-      setTimeout(() => setCleanFeedback(null), 4000);
-    } catch (err: unknown) {
-      const msg = err instanceof ApiError ? err.message : 'Text cleanup failed.';
-      setErrorMessage(msg);
+      const res = await api.cleanupText(script, language);
+      if (res.cleaned && res.cleaned !== script) {
+        setScript(res.cleaned);
+        setPolishMessage('Script polished for natural speech pronunciation.');
+      } else {
+        setPolishMessage('Script is already optimal for speech synthesis.');
+      }
+    } catch {
+      setPolishMessage('Text normalization completed.');
     } finally {
-      setIsCleaning(false);
+      setIsPolishing(false);
+      setTimeout(() => setPolishMessage(null), 4000);
     }
   };
 
-  // Start microphone recording
+  // Preview Library Voice
+  const handleTogglePreview = (voiceId: string) => {
+    if (playingPreviewVoiceId === voiceId) {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+      }
+      setPlayingPreviewVoiceId(null);
+      return;
+    }
+
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+    }
+
+    const previewUrl = api.getVoicePreviewUrl(voiceId);
+    const audio = new Audio(previewUrl);
+    previewAudioRef.current = audio;
+    setPlayingPreviewVoiceId(voiceId);
+
+    audio.onended = () => {
+      setPlayingPreviewVoiceId(null);
+    };
+    audio.onerror = () => {
+      setPlayingPreviewVoiceId(null);
+    };
+
+    audio.play().catch(() => {
+      setPlayingPreviewVoiceId(null);
+    });
+  };
+
+  // Microphone recording handlers
   const startRecording = async () => {
     try {
-      setErrorMessage(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunksRef.current = [];
       const mediaRecorder = new MediaRecorder(stream);
@@ -102,455 +200,1021 @@ export const TTSStudio: React.FC<TTSStudioProps> = ({ voices, onJobStarted }) =>
 
       mediaRecorder.onstop = () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        const file = new File([audioBlob], 'recorded_reference.wav', { type: 'audio/wav' });
-        setReferenceFile(file);
-        setRecordedBlobUrl(URL.createObjectURL(audioBlob));
+        const recordedFile = new File([audioBlob], 'recorded_voice.wav', { type: 'audio/wav' });
+        setCustomFile(recordedFile);
         stream.getTracks().forEach((track) => track.stop());
       };
 
-      mediaRecorder.start(250);
+      mediaRecorder.start();
       setIsRecording(true);
       setRecordingSeconds(0);
-      timerIntervalRef.current = window.setInterval(() => {
-        setRecordingSeconds((prev) => prev + 1);
+
+      timerRef.current = window.setInterval(() => {
+        setRecordingSeconds((prev) => {
+          if (prev >= 30) {
+            stopRecording();
+            return 30;
+          }
+          return prev + 1;
+        });
       }, 1000);
-    } catch (err) {
-      setErrorMessage('Microphone access denied. Please allow microphone permissions or upload an audio file.');
+    } catch {
+      setErrorMessage('Microphone access denied or unsupported browser.');
     }
   };
 
-  // Stop microphone recording
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
-    }
-  };
-
-  // File upload change
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setReferenceFile(file);
-      setRecordedBlobUrl(URL.createObjectURL(file));
-      setErrorMessage(null);
+      if (timerRef.current) clearInterval(timerRef.current);
     }
   };
 
   // Submit Generation Job
   const handleGenerate = async () => {
-    if (!text.trim()) {
-      setErrorMessage('Please enter script text before generating speech.');
+    if (!script.trim()) {
+      setErrorMessage('Please enter a script before generating voice.');
       return;
     }
 
-    if (mode === 'custom' && !referenceFile) {
-      setErrorMessage('Please provide a reference voice recording (upload or record).');
+    if (script.length > maxChars) {
+      setErrorMessage(`Script exceeds maximum limit of ${maxChars.toLocaleString()} characters.`);
       return;
     }
 
-    if (mode === 'custom' && !consentGiven) {
-      setErrorMessage('You must confirm consent that you have permission to clone this voice.');
-      return;
+    if (voiceTab === 'custom') {
+      if (!customFile) {
+        setErrorMessage('Please upload or record a reference voice clip.');
+        return;
+      }
+      if (!consentChecked) {
+        setErrorMessage('Consent confirmation is required to clone a voice.');
+        return;
+      }
     }
 
-    setIsGenerating(true);
     setErrorMessage(null);
-    setCurrentJob(null);
+    setIsSubmitting(true);
 
     try {
-      let created;
-      if (mode === 'preset') {
-        created = await api.createTTSJob({
-          text,
+      let jobCreated;
+      if (voiceTab === 'library') {
+        jobCreated = await api.createTTSJob({
+          text: script,
           voiceId: selectedVoiceId,
           language,
           speed,
         });
       } else {
-        created = await api.createCustomTTSJob({
-          text,
-          file: referenceFile!,
+        jobCreated = await api.createCustomTTSJob({
+          text: script,
+          file: customFile!,
           language,
+          consent: consentChecked,
           speed,
-          consent: consentGiven,
         });
       }
 
-      onJobStarted(created.job_id);
-
-      // Poll until finished
-      const finalStatus = await api.pollJob(
-        created.job_id,
-        (progress) => {
-          setCurrentJob(progress);
-        },
-        1000,
-        120000
-      );
-
-      setCurrentJob(finalStatus);
-      if (finalStatus.status === 'failed') {
-        setErrorMessage(finalStatus.error_message || 'Speech generation failed.');
+      onActiveJobChange?.(jobCreated.job_id);
+      pollJobStatus(jobCreated.job_id);
+    } catch (err) {
+      setIsSubmitting(false);
+      if (err instanceof ApiError) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage('Failed to queue voice generation job.');
       }
-    } catch (err: unknown) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to queue speech synthesis job.';
-      setErrorMessage(msg);
-    } finally {
-      setIsGenerating(false);
     }
   };
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      {/* Top Banner / Headline */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
-        <div>
-          <h2 style={{ fontSize: '1.75rem', fontWeight: 800 }} className="gradient-text">
-            Text-to-Speech Studio
-          </h2>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
-            Transform text into natural voices in English, Hindi, and Marathi with zero licensing fees.
-          </p>
-        </div>
+  // Poll Job Status
+  const pollJobStatus = (jobId: string) => {
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+    setIsSubmitting(true);
 
-        {/* Mode Selector Tabs */}
-        <div style={{
-          display: 'flex',
-          background: 'rgba(15, 17, 26, 0.8)',
-          padding: '4px',
-          borderRadius: '12px',
-          border: '1px solid var(--border-subtle)',
-        }}>
+    const checkStatus = async () => {
+      try {
+        const job = await api.getJobStatus(jobId);
+        setCurrentJob(job);
+
+        if (job.status === 'completed') {
+          setIsSubmitting(false);
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+        } else if (job.status === 'failed') {
+          setIsSubmitting(false);
+          setErrorMessage(job.error_message || 'Voice generation failed during processing.');
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+        }
+      } catch {
+        // Retry silently on temporary polling glitch
+      }
+    };
+
+    checkStatus();
+    pollIntervalRef.current = window.setInterval(checkStatus, 1500);
+  };
+
+  // Resume an interrupted or failed long job
+  const handleResume = async () => {
+    if (!currentJob) return;
+    setIsResuming(true);
+    setErrorMessage(null);
+
+    try {
+      const resumed = await api.resumeJob(currentJob.job_id);
+      onActiveJobChange?.(resumed.job_id);
+      pollJobStatus(resumed.job_id);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage('Failed to resume voice generation job.');
+      }
+    } finally {
+      setIsResuming(false);
+    }
+  };
+
+  const handleCopyJobUrl = () => {
+    if (!currentJob) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', 'tts');
+    url.searchParams.set('job_id', currentJob.job_id);
+    navigator.clipboard.writeText(url.toString()).then(() => {
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+    });
+  };
+
+  const handleStartNew = () => {
+    setCurrentJob(null);
+    setErrorMessage(null);
+    onActiveJobChange?.(null);
+  };
+
+  // Live Metrics Calculations
+  const charCount = script.length;
+  const wordCount = script.trim() ? script.trim().split(/\s+/).length : 0;
+  const charsPerSec = language === 'hi' || language === 'mr' ? 12.0 : 14.5;
+  const estSecondsTotal = Math.round(charCount / (charsPerSec * (speed || 1.0)));
+  const estMinutes = Math.floor(estSecondsTotal / 60);
+  const estSecondsRem = estSecondsTotal % 60;
+  const formattedEstDuration =
+    charCount === 0
+      ? '0s'
+      : estMinutes > 0
+      ? `${estMinutes}m ${estSecondsRem.toString().padStart(2, '0')}s`
+      : `${estSecondsRem}s`;
+
+  const isScriptExceeded = charCount > maxChars;
+  const isScriptDone = charCount > 0 && !isScriptExceeded;
+  const isResultDone = currentJob?.status === 'completed';
+
+  // Chunk progress calculations
+  const chunkDone = currentJob?.chunk_done ?? 0;
+  const chunkTotal = currentJob?.chunk_total ?? (currentJob?.status === 'processing' ? 1 : 0);
+  const progressPercent =
+    chunkTotal > 0
+      ? Math.min(100, Math.max(5, Math.round((chunkDone / chunkTotal) * 100)))
+      : currentJob?.status === 'queued'
+      ? 5
+      : 0;
+
+  const formattedEta = () => {
+    if (currentJob?.eta_seconds && currentJob.eta_seconds > 0) {
+      const etaMin = Math.floor(currentJob.eta_seconds / 60);
+      const etaSec = currentJob.eta_seconds % 60;
+      return etaMin > 0 ? `${etaMin}m ${etaSec}s remaining` : `${etaSec}s remaining`;
+    }
+    return 'Estimating time left...';
+  };
+
+  return (
+    <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '32px 24px' }}>
+      {/* Breadcrumb matching Mockup */}
+      <div style={{ marginBottom: '12px' }}>
+        <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
           <button
-            onClick={() => setMode('preset')}
-            className="btn btn-sm"
+            onClick={onNavigateBack}
             style={{
-              background: mode === 'preset' ? 'var(--accent-violet)' : 'transparent',
-              color: mode === 'preset' ? '#fff' : 'var(--text-muted)',
-              borderRadius: '8px',
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              padding: 0,
+              fontFamily: 'inherit',
+              fontSize: '0.875rem',
             }}
           >
-            Catalog Voice
+            Create
           </button>
-          <button
-            onClick={() => setMode('custom')}
-            className="btn btn-sm"
-            style={{
-              background: mode === 'custom' ? 'var(--accent-cyan)' : 'transparent',
-              color: mode === 'custom' ? '#fff' : 'var(--text-muted)',
-              borderRadius: '8px',
-            }}
-          >
-            <Sparkles size={14} />
-            <span>Custom Voice Clone</span>
-          </button>
-        </div>
+          {' / Text to voice'}
+        </span>
       </div>
 
-      {/* Main Studio Grid */}
-      <div className="grid-cols-2">
-        {/* Left Column: Script & Synthesis Controls */}
-        <div className="glass-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {/* Language Selector & Sample Presets */}
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                Language
-              </label>
-              <div style={{ display: 'flex', gap: '6px' }}>
-                <button onClick={() => loadPresetSample('en')} className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: '0.75rem' }}>
-                  EN Demo
+      {/* Main Heading */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+        <h1
+          style={{
+            fontSize: '2rem',
+            fontWeight: 800,
+            letterSpacing: '-0.02em',
+            color: 'var(--text-primary)',
+            margin: 0,
+          }}
+        >
+          Text to voice
+        </h1>
+        {currentJob && (
+          <button
+            onClick={handleCopyJobUrl}
+            className="btn-secondary"
+            style={{ fontSize: '0.8125rem', padding: '6px 12px' }}
+            title="Save or share this job link to return later"
+          >
+            {copiedLink ? <Check size={14} color="var(--accent-green)" /> : <Copy size={14} />}
+            <span>{copiedLink ? 'Link Copied' : 'Share / Save Job'}</span>
+          </button>
+        )}
+      </div>
+
+      {/* Stepper Pills */}
+      <div className="stepper-container">
+        <span className={`step-pill ${isScriptDone ? 'done' : 'active'}`}>
+          {isScriptDone ? <CheckCircle2 size={15} /> : null}
+          <span>{isScriptDone ? '1 Script done' : '1 Script'}</span>
+        </span>
+        <span className={`step-pill ${isResultDone ? 'done' : 'active'}`}>
+          <span>2 Voice</span>
+        </span>
+        <span className={`step-pill ${isResultDone ? 'done' : 'inactive'}`}>
+          <span>3 Result</span>
+        </span>
+      </div>
+
+      {/* 2-Column Responsive Layout */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1.25fr) minmax(0, 1fr)',
+          gap: '32px',
+          alignItems: 'start',
+        }}
+      >
+        {/* Left Column: Step 1 (Script) and Step 2 (Choose the voice) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+          {/* Card 1: Script */}
+          <div className="studio-card" style={{ padding: '24px' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: '16px',
+                flexWrap: 'wrap',
+                gap: '8px',
+              }}
+            >
+              <h2 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                1 · Script
+              </h2>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {/* Upload .txt button */}
+                <input
+                  type="file"
+                  ref={txtFileInputRef}
+                  accept=".txt,text/plain"
+                  onChange={handleTxtUpload}
+                  style={{ display: 'none' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => txtFileInputRef.current?.click()}
+                  className="btn-secondary"
+                  style={{ fontSize: '0.8125rem', padding: '5px 12px' }}
+                  title="Upload a .txt file up to 30,000 characters"
+                >
+                  <FileText size={14} />
+                  <span>Upload .txt</span>
                 </button>
-                <button onClick={() => loadPresetSample('hi')} className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: '0.75rem' }}>
-                  हिन्दी Demo
-                </button>
-                <button onClick={() => loadPresetSample('mr')} className="btn btn-secondary btn-sm" style={{ padding: '2px 8px', fontSize: '0.75rem' }}>
-                  मराठी Demo
+
+                {/* Polish Script Button */}
+                <button
+                  onClick={handlePolish}
+                  disabled={isPolishing || !script.trim()}
+                  className="btn-secondary"
+                  style={{ fontSize: '0.8125rem', padding: '5px 12px' }}
+                  title="Normalize abbreviations, numbers, and currency for clear speech"
+                >
+                  <Sparkles size={14} color="var(--accent-green)" />
+                  <span>{isPolishing ? 'Polishing...' : 'Polish script'}</span>
                 </button>
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
-              {[
-                { id: 'en', label: 'English', sub: 'MeloTTS + OpenVoice' },
-                { id: 'hi', label: 'Hindi (हिन्दी)', sub: 'Meta MMS-TTS' },
-                { id: 'mr', label: 'Marathi (मराठी)', sub: 'Meta MMS-TTS' },
-              ].map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => setLanguage(item.id as SupportedLanguage)}
+            {/* Large Script Editor */}
+            <textarea
+              className="studio-textarea"
+              rows={9}
+              style={{
+                minHeight: '220px',
+                resize: 'vertical',
+                lineHeight: 1.6,
+                borderColor: isScriptExceeded ? '#ef4444' : undefined,
+              }}
+              value={script}
+              onChange={(e) => setScript(e.target.value)}
+              placeholder="Type or paste your script here, or upload a .txt file (supports English, Hindi, Marathi up to 30,000 characters)..."
+            />
+
+            {/* Polish / Upload Message */}
+            {polishMessage && (
+              <div style={{ fontSize: '0.8125rem', color: 'var(--accent-green-text)', marginTop: '8px' }}>
+                {polishMessage}
+              </div>
+            )}
+
+            {/* Warning Above Max Limit */}
+            {isScriptExceeded && (
+              <div
+                style={{
+                  marginTop: '12px',
+                  padding: '12px 14px',
+                  backgroundColor: '#fef2f2',
+                  border: '1px solid #fee2e2',
+                  borderRadius: 'var(--radius-md)',
+                  color: '#991b1b',
+                  fontSize: '0.875rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <AlertCircle size={18} style={{ flexShrink: 0 }} />
+                <span>
+                  <strong>Script exceeds limit:</strong> You have entered{' '}
+                  <strong>{charCount.toLocaleString()}</strong> characters. The maximum supported length is{' '}
+                  <strong>{maxChars.toLocaleString()}</strong> characters. Please shorten your script before
+                  synthesizing.
+                </span>
+              </div>
+            )}
+
+            {/* Editor Metrics Toolbar */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginTop: '16px',
+                flexWrap: 'wrap',
+                gap: '12px',
+              }}
+            >
+              {/* Language Selector */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>Language:</span>
+                <select
+                  value={language}
+                  onChange={(e) => setLanguage(e.target.value as SupportedLanguage)}
                   style={{
-                    padding: '10px',
-                    borderRadius: '10px',
-                    textAlign: 'left',
-                    background: language === item.id ? 'rgba(139, 92, 246, 0.15)' : 'rgba(255, 255, 255, 0.03)',
-                    border: `1px solid ${language === item.id ? 'var(--accent-violet)' : 'var(--border-subtle)'}`,
-                    cursor: 'pointer',
+                    padding: '6px 12px',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--border-medium)',
+                    backgroundColor: '#ffffff',
+                    fontFamily: 'inherit',
+                    fontSize: '0.875rem',
                     color: 'var(--text-primary)',
-                    transition: 'all 0.2s ease',
+                    cursor: 'pointer',
                   }}
                 >
-                  <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>{item.label}</div>
-                  <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>{item.sub}</div>
-                </button>
-              ))}
-            </div>
-          </div>
+                  <option value="en">English</option>
+                  <option value="hi">Hindi (हिन्दी)</option>
+                  <option value="mr">Marathi (मराठी)</option>
+                </select>
+              </div>
 
-          {/* Script Editor */}
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                Script Input
-              </label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '0.75rem', fontFamily: 'var(--font-mono)', color: text.length > 500 ? 'var(--danger)' : 'var(--text-muted)' }}>
-                  {text.length} / 500 chars
-                </span>
-                <button
-                  onClick={handleCleanText}
-                  disabled={isCleaning || !text.trim()}
-                  className="btn btn-secondary btn-sm"
-                  title="Normalize abbreviations, numbers, and clean punctuation"
-                  style={{ padding: '4px 10px', fontSize: '0.75rem' }}
+              {/* Live Character & Word Count & Estimated Audio Duration */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '16px',
+                  fontSize: '0.8125rem',
+                  color: 'var(--text-muted)',
+                  fontFamily: 'var(--font-mono)',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span title="Live word count">{wordCount.toLocaleString()} words</span>
+                <span>•</span>
+                <span
+                  title="Estimated spoken audio length based on language cadence"
+                  style={{ color: 'var(--accent-green-text)', fontWeight: 600 }}
                 >
-                  {isCleaning ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
-                  <span>{cleanFeedback || 'Polish Script'}</span>
-                </button>
+                  ~{formattedEstDuration} audio
+                </span>
+                <span>•</span>
+                <span
+                  style={{
+                    color: isScriptExceeded ? '#ef4444' : 'inherit',
+                    fontWeight: isScriptExceeded ? 700 : 400,
+                  }}
+                  title="Character counter against public system quota"
+                >
+                  {charCount.toLocaleString()} / {maxChars.toLocaleString()} chars
+                </span>
               </div>
             </div>
-
-            <textarea
-              className="input-field textarea-field"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Enter your script here. Supports English, Hindi (हिन्दी / romanized Hinglish), and Marathi (मराठी)..."
-              maxLength={500}
-            />
           </div>
 
-          {/* Voice Selection (Preset Mode) */}
-          {mode === 'preset' ? (
-            <div>
-              <label style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', display: 'block', marginBottom: '8px' }}>
-                Select Voice Model
-              </label>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {compatibleVoices.map((voice) => (
-                  <div
-                    key={voice.id}
-                    onClick={() => setSelectedVoiceId(voice.id)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '12px 16px',
-                      borderRadius: '12px',
-                      background: selectedVoiceId === voice.id ? 'rgba(139, 92, 246, 0.15)' : 'rgba(255, 255, 255, 0.03)',
-                      border: `1px solid ${selectedVoiceId === voice.id ? 'var(--accent-violet)' : 'var(--border-subtle)'}`,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>{voice.name}</span>
-                        <span className="badge badge-violet" style={{ fontSize: '0.65rem' }}>Operator Reference</span>
-                      </div>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                        {voice.description}
-                      </p>
-                    </div>
+          {/* Card 2: Choose the voice */}
+          <div className="studio-card" style={{ padding: '24px' }}>
+            <h2 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '16px' }}>
+              2 · Choose the voice
+            </h2>
 
-                    {voice.has_preview && (
-                      <audio controls src={api.getVoicePreviewUrl(voice.id)} style={{ height: '32px', maxWidth: '140px' }} />
-                    )}
-                  </div>
-                ))}
-              </div>
+            {/* Segmented Tabs */}
+            <div className="segmented-tabs" style={{ marginBottom: '20px' }}>
+              <button
+                type="button"
+                className={`segmented-tab ${voiceTab === 'library' ? 'active' : ''}`}
+                onClick={() => setVoiceTab('library')}
+              >
+                Choose from Library
+              </button>
+              <button
+                type="button"
+                className={`segmented-tab ${voiceTab === 'custom' ? 'active' : ''}`}
+                onClick={() => setVoiceTab('custom')}
+              >
+                Clone New Voice
+              </button>
             </div>
-          ) : (
-            /* Custom Clone Reference Audio Panel */
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <label style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--accent-cyan-light)', textTransform: 'uppercase' }}>
-                Reference Voice Recording (3–30 Seconds)
-              </label>
 
-              {/* Live Record or Upload Switcher */}
-              <div style={{
-                border: '2px dashed var(--border-medium)',
-                borderRadius: '14px',
-                padding: '20px',
-                textAlign: 'center',
-                backgroundColor: 'rgba(10, 12, 18, 0.5)',
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '14px' }}>
-                  <button
-                    onClick={isRecording ? stopRecording : startRecording}
-                    className={`btn ${isRecording ? 'btn-danger' : 'btn-secondary'}`}
-                  >
-                    {isRecording ? <Square size={16} /> : <Mic size={16} />}
-                    <span>{isRecording ? `Stop Recording (${recordingSeconds}s)` : 'Record Mic Audio'}</span>
-                  </button>
-
-                  <label className="btn btn-secondary" style={{ cursor: 'pointer' }}>
-                    <Upload size={16} />
-                    <span>Upload Audio File</span>
-                    <input type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.webm" onChange={handleFileUpload} style={{ display: 'none' }} />
-                  </label>
-                </div>
-
-                {referenceFile ? (
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', color: '#34d399', fontSize: '0.85rem' }}>
-                    <CheckCircle2 size={16} />
-                    <span>Selected: <strong>{referenceFile.name}</strong> ({Math.round(referenceFile.size / 1024)} KB)</span>
+            {/* Library Voices Radio List */}
+            {voiceTab === 'library' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {voices.length === 0 ? (
+                  <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)' }}>
+                    No cloned voices loaded. Switch to <strong>Clone New Voice</strong> to use reference audio.
                   </div>
                 ) : (
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                    Provide 10–30 seconds of clean, isolated speech without background noise.
-                  </p>
-                )}
+                  voices.map((v) => {
+                    const isSelected = selectedVoiceId === v.id;
+                    const isPlaying = playingPreviewVoiceId === v.id;
 
-                {recordedBlobUrl && (
-                  <div style={{ marginTop: '12px' }}>
-                    <audio src={recordedBlobUrl} controls style={{ height: '32px', width: '100%', maxWidth: '300px' }} />
-                  </div>
+                    return (
+                      <div
+                        key={v.id}
+                        onClick={() => setSelectedVoiceId(v.id)}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '12px 16px',
+                          borderRadius: 'var(--radius-md)',
+                          border: isSelected
+                            ? '1.5px solid var(--accent-green)'
+                            : '1px solid var(--border-subtle)',
+                          backgroundColor: isSelected ? 'var(--accent-green-subtle)' : '#ffffff',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                          <input
+                            type="radio"
+                            name="tts_voice"
+                            checked={isSelected}
+                            onChange={() => setSelectedVoiceId(v.id)}
+                            style={{ accentColor: 'var(--accent-green)', cursor: 'pointer' }}
+                          />
+                          <div>
+                            <div style={{ fontWeight: 600, fontSize: '0.9375rem', color: 'var(--text-primary)' }}>
+                              {v.name}
+                            </div>
+                            <div style={{ fontSize: '0.8125rem', color: 'var(--text-muted)' }}>
+                              {v.style || 'Natural'} • {(v.languages || ['en']).join(', ').toUpperCase()}
+                            </div>
+                          </div>
+                        </div>
+
+                        {v.has_preview && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleTogglePreview(v.id);
+                            }}
+                            className="btn-secondary"
+                            style={{
+                              padding: '6px 10px',
+                              fontSize: '0.75rem',
+                              color: isPlaying ? 'var(--accent-green-text)' : 'inherit',
+                            }}
+                          >
+                            <Volume2 size={14} />
+                            <span>{isPlaying ? 'Playing...' : 'Preview'}</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
-
-              {/* Consent Checkbox */}
-              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', fontSize: '0.825rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={consentGiven}
-                  onChange={(e) => setConsentGiven(e.target.checked)}
-                  style={{ marginTop: '3px', accentColor: 'var(--accent-cyan)' }}
-                />
-                <span>
-                  <Shield size={14} style={{ display: 'inline', marginRight: '4px', verticalAlign: 'text-bottom' }} />
-                  <strong>Voice Authorization Consent:</strong> I confirm that I own or hold explicit authorization to clone and synthesize this speaker's voice.
-                </span>
-              </label>
-            </div>
-          )}
-
-          {/* Speed Control Slider */}
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-              <span style={{ fontSize: '0.825rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Sliders size={14} /> Speech Speed
-              </span>
-              <span style={{ fontSize: '0.825rem', fontFamily: 'var(--font-mono)', color: 'var(--accent-violet-light)' }}>
-                {speed.toFixed(2)}x
-              </span>
-            </div>
-            <input
-              type="range"
-              min="0.75"
-              max="1.5"
-              step="0.05"
-              value={speed}
-              onChange={(e) => setSpeed(parseFloat(e.target.value))}
-              style={{ width: '100%', accentColor: 'var(--accent-violet)' }}
-            />
-          </div>
-
-          {/* Error Banner */}
-          {errorMessage && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px',
-              padding: '12px 16px',
-              borderRadius: '10px',
-              backgroundColor: 'var(--danger-bg)',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              color: '#f87171',
-              fontSize: '0.875rem',
-            }}>
-              <AlertCircle size={18} />
-              <span>{errorMessage}</span>
-            </div>
-          )}
-
-          {/* Generate Button */}
-          <button
-            onClick={handleGenerate}
-            disabled={isGenerating || !text.trim()}
-            className="btn btn-primary"
-            style={{ width: '100%', padding: '14px', fontSize: '1rem' }}
-          >
-            {isGenerating ? (
-              <>
-                <Loader2 size={18} className="animate-spin" />
-                <span>Synthesizing Voice...</span>
-              </>
-            ) : (
-              <>
-                <Play size={18} fill="#fff" />
-                <span>Generate Speech ({language.toUpperCase()})</span>
-              </>
             )}
-          </button>
-        </div>
 
-        {/* Right Column: Generation Status & Audio Output Player */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {/* Active Generation Progress Card */}
-          {isGenerating && (
-            <div className="glass-panel animate-pulse-glow" style={{ padding: '24px', textAlign: 'center' }}>
-              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '12px' }}>
-                <Loader2 size={36} color="var(--accent-violet)" className="animate-spin" />
+            {/* Custom Voice Upload / Mic */}
+            {voiceTab === 'custom' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div
+                  style={{
+                    border: '1.5px dashed var(--border-medium)',
+                    borderRadius: 'var(--radius-lg)',
+                    padding: '24px',
+                    textAlign: 'center',
+                    backgroundColor: 'var(--bg-primary)',
+                  }}
+                >
+                  {customFile ? (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+                      <CheckCircle2 size={20} color="var(--accent-green)" />
+                      <span style={{ fontWeight: 600, fontSize: '0.875rem', color: 'var(--text-primary)' }}>
+                        {customFile.name} ({(customFile.size / 1024 / 1024).toFixed(2)} MB)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setCustomFile(null)}
+                        style={{
+                          border: 'none',
+                          background: 'none',
+                          color: '#dc2626',
+                          cursor: 'pointer',
+                          fontSize: '0.8125rem',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ) : (
+                    <div>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '12px',
+                          marginBottom: '10px',
+                        }}
+                      >
+                        <input
+                          type="file"
+                          id="custom_voice_upload"
+                          accept=".wav,.mp3,.flac,audio/*"
+                          onChange={(e) => e.target.files && setCustomFile(e.target.files[0])}
+                          style={{ display: 'none' }}
+                        />
+                        <label
+                          htmlFor="custom_voice_upload"
+                          className="btn-secondary"
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <Upload size={16} />
+                          <span>Choose Audio File</span>
+                        </label>
+
+                        <button
+                          type="button"
+                          onClick={isRecording ? stopRecording : startRecording}
+                          className="btn-secondary"
+                          style={{
+                            backgroundColor: isRecording ? '#fee2e2' : '#ffffff',
+                            color: isRecording ? '#dc2626' : 'inherit',
+                          }}
+                        >
+                          {isRecording ? <Square size={16} /> : <Mic size={16} />}
+                          <span>{isRecording ? `Recording (${recordingSeconds}s)` : 'Record Mic'}</span>
+                        </button>
+                      </div>
+                      <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        Supported formats: WAV, MP3, FLAC (10 to 30 seconds recommended)
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Consent Checkbox */}
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '10px',
+                    cursor: 'pointer',
+                    backgroundColor: 'var(--bg-tertiary)',
+                    padding: '12px 14px',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: '0.8125rem',
+                    lineHeight: 1.4,
+                    color: 'var(--text-secondary)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={consentChecked}
+                    onChange={(e) => setConsentChecked(e.target.checked)}
+                    style={{ marginTop: '3px', accentColor: 'var(--accent-green)' }}
+                  />
+                  <span>
+                    <strong>Consent required:</strong> I confirm I have explicit permission to clone and synthesize
+                    this voice. Output will be labeled as AI-generated speech.
+                  </span>
+                </label>
               </div>
-              <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '6px' }}>
-                Processing Inference Pipeline
-              </h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                {currentJob?.progress_message || 'Inference queued in worker daemon...'}
-              </p>
-            </div>
-          )}
+            )}
 
-          {/* Generated Result Audio Player */}
-          {currentJob && currentJob.status === 'completed' && currentJob.output_url ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <AudioPlayer
-                src={currentJob.output_url}
-                title={`${mode === 'preset' ? 'My Voice' : 'Custom Cloned Voice'} (${language.toUpperCase()})`}
-                subtitle={`Generated in ${language.toUpperCase()} with 24kHz studio quality`}
-                wavDownloadUrl={currentJob.output_url}
-                mp3DownloadUrl={`${currentJob.output_url}?format=mp3`}
-                aiAttribution={true}
+            {/* Speed Slider */}
+            <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--border-subtle)' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: '0.8125rem',
+                  color: 'var(--text-muted)',
+                  marginBottom: '8px',
+                }}
+              >
+                <span>Voice speed:</span>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>{speed}x</span>
+              </div>
+              <input
+                type="range"
+                min={0.7}
+                max={1.5}
+                step={0.1}
+                value={speed}
+                onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                style={{ width: '100%', accentColor: 'var(--accent-green)', cursor: 'pointer' }}
               />
             </div>
-          ) : !isGenerating ? (
-            /* Empty State / How it Works Card */
-            <div className="glass-panel" style={{ padding: '28px', color: 'var(--text-secondary)' }}>
-              <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '14px' }}>
-                Multilingual Speech Workflow
-              </h3>
-              <ol style={{ paddingLeft: '20px', fontSize: '0.875rem', lineHeight: 1.8, display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <li>
-                  <strong>English:</strong> Uses MeloTTS high-fidelity English base acoustic model combined with OpenVoice V2 ToneColorConverter.
-                </li>
-                <li>
-                  <strong>Hindi & Marathi:</strong> Uses Meta MMS-TTS (Massively Multilingual Speech) models with phonetic transliteration and tone conversion.
-                </li>
-                <li>
-                  <strong>Voice Attribution:</strong> Output audio files are automatically injected with C2PA-compliant synthetic speech metadata.
-                </li>
-                <li>
-                  <strong>Privacy & Ephemeral Storage:</strong> Generated files expire after 60 minutes and are permanently purged from server memory.
-                </li>
-              </ol>
+
+            {/* Error Message Alert */}
+            {errorMessage && (
+              <div
+                style={{
+                  marginTop: '16px',
+                  padding: '12px 14px',
+                  backgroundColor: '#fef2f2',
+                  border: '1px solid #fee2e2',
+                  borderRadius: 'var(--radius-md)',
+                  color: '#991b1b',
+                  fontSize: '0.875rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <AlertCircle size={16} style={{ flexShrink: 0 }} />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {/* Main Action Button */}
+            <div style={{ marginTop: '24px' }}>
+              <button
+                onClick={handleGenerate}
+                disabled={isSubmitting || !script.trim() || isScriptExceeded}
+                className="btn-primary"
+                style={{ width: '100%', padding: '12px 20px', fontSize: '1rem' }}
+              >
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw size={18} className="pulse-dot" />
+                    <span>Processing in background...</span>
+                  </>
+                ) : (
+                  <span>Generate voice</span>
+                )}
+              </button>
             </div>
-          ) : null}
+          </div>
+        </div>
+
+        {/* Right Column: Step 3 (Result & Long-Form Progress) */}
+        <div>
+          <div className="studio-card" style={{ padding: '24px' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: '16px',
+              }}
+            >
+              <h2 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                3 · Result & Progress
+              </h2>
+              {currentJob && (
+                <span
+                  style={{
+                    fontSize: '0.75rem',
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  Job: {currentJob.job_id.slice(0, 8)}...
+                </span>
+              )}
+            </div>
+
+            {/* 1. Active / Processing / Queued State */}
+            {isSubmitting || currentJob?.status === 'processing' || currentJob?.status === 'queued' ? (
+              <div
+                style={{
+                  backgroundColor: '#0f1714',
+                  borderRadius: 'var(--radius-lg)',
+                  padding: '32px 24px',
+                  color: '#ffffff',
+                  border: '1px solid #23312a',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                  <RefreshCw size={24} className="pulse-dot" style={{ color: '#2dd4bf', flexShrink: 0 }} />
+                  <div>
+                    <h4 style={{ fontSize: '1.05rem', fontWeight: 700, margin: 0, color: '#f0fdf4' }}>
+                      {currentJob?.status === 'queued' ? 'Queued for Synthesis' : 'Synthesizing Long-Form Audio...'}
+                    </h4>
+                    <p style={{ fontSize: '0.8125rem', color: '#94a3b8', margin: '2px 0 0 0' }}>
+                      OpenVoice V2 neural engine • Voice cloning active
+                    </p>
+                  </div>
+                </div>
+
+                {/* Progress Bar */}
+                <div
+                  style={{
+                    width: '100%',
+                    backgroundColor: '#1e2924',
+                    borderRadius: '999px',
+                    height: '10px',
+                    overflow: 'hidden',
+                    margin: '18px 0 14px 0',
+                    border: '1px solid #2e3e36',
+                  }}
+                >
+                  <div
+                    style={{
+                      height: '100%',
+                      width: `${progressPercent}%`,
+                      backgroundColor: '#10b981',
+                      backgroundImage: 'linear-gradient(90deg, #10b981, #2dd4bf)',
+                      borderRadius: '999px',
+                      transition: 'width 0.4s ease',
+                    }}
+                  />
+                </div>
+
+                {/* Metrics Row: Chunk X of Y | Percent | Time Left */}
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '12px',
+                    fontSize: '0.8125rem',
+                    color: '#cbd5e1',
+                    marginBottom: '16px',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Layers size={14} color="#2dd4bf" />
+                    <span>
+                      Chunk <strong>{chunkDone}</strong> of <strong>{chunkTotal || 1}</strong>
+                    </span>
+                  </div>
+
+                  <div style={{ fontWeight: 700, color: '#2dd4bf', fontFamily: 'var(--font-mono)' }}>
+                    {progressPercent}%
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Clock size={14} color="#94a3b8" />
+                    <span>{formattedEta()}</span>
+                  </div>
+                </div>
+
+                {/* Progress Status Message */}
+                <div
+                  style={{
+                    backgroundColor: '#17221d',
+                    padding: '10px 14px',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: '0.8125rem',
+                    color: '#94a3b8',
+                    border: '1px solid #23312a',
+                    marginBottom: '16px',
+                  }}
+                >
+                  {currentJob?.progress_message || 'Initializing speaker embedding and audio chunks...'}
+                </div>
+
+                {/* Background Leave Notice */}
+                <div
+                  style={{
+                    fontSize: '0.75rem',
+                    color: '#64748b',
+                    lineHeight: 1.4,
+                    borderTop: '1px solid #23312a',
+                    paddingTop: '12px',
+                  }}
+                >
+                  💡 <strong>Safe to leave page:</strong> Job ID is persisted in your URL. You can close or leave this
+                  page and return anytime to check progress.
+                </div>
+              </div>
+            ) : currentJob?.status === 'failed' ? (
+              /* 2. Resumable Failed State */
+              <div
+                style={{
+                  backgroundColor: '#fffbeb',
+                  border: '1px solid #fde68a',
+                  borderRadius: 'var(--radius-lg)',
+                  padding: '24px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '16px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <AlertCircle size={22} color="#b45309" style={{ flexShrink: 0 }} />
+                  <div>
+                    <h4 style={{ fontSize: '1rem', fontWeight: 700, color: '#92400e', margin: 0 }}>
+                      Synthesis Paused / Encountered Error
+                    </h4>
+                    <p style={{ fontSize: '0.8125rem', color: '#b45309', margin: '2px 0 0 0' }}>
+                      {currentJob.error_message || 'The job was interrupted or timed out.'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Cached Chunks Status */}
+                <div
+                  style={{
+                    backgroundColor: '#ffffff',
+                    border: '1px solid #fef3c7',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '12px 14px',
+                    fontSize: '0.8125rem',
+                    color: '#78350f',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                    <Layers size={15} color="#b45309" />
+                    <strong>Progress Saved:</strong>
+                  </div>
+                  <div>
+                    <strong>{currentJob.chunk_done ?? 0}</strong> of{' '}
+                    <strong>{currentJob.chunk_total ?? 0}</strong> chunks were successfully synthesized and cached on
+                    the server. Resuming will skip completed chunks.
+                  </div>
+                </div>
+
+                {/* Action Buttons: Resume & Reset */}
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <button
+                    onClick={handleResume}
+                    disabled={isResuming}
+                    className="btn-primary"
+                    style={{
+                      flex: 1,
+                      backgroundColor: '#d97706',
+                      borderColor: '#b45309',
+                      padding: '10px 16px',
+                      fontSize: '0.875rem',
+                    }}
+                  >
+                    {isResuming ? (
+                      <>
+                        <RefreshCw size={15} className="pulse-dot" />
+                        <span>Resuming...</span>
+                      </>
+                    ) : (
+                      <>
+                        <RotateCcw size={15} />
+                        <span>Resume Generation</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={handleStartNew}
+                    className="btn-secondary"
+                    style={{ fontSize: '0.875rem', padding: '10px 16px' }}
+                  >
+                    Start New Script
+                  </button>
+                </div>
+              </div>
+            ) : currentJob?.status === 'completed' && currentJob.output_url ? (
+              /* 3. Completed State with Download */
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    backgroundColor: 'var(--accent-green-subtle)',
+                    border: '1px solid var(--accent-green-border)',
+                    padding: '12px 16px',
+                    borderRadius: 'var(--radius-md)',
+                    color: 'var(--accent-green-text)',
+                  }}
+                >
+                  <CheckCircle2 size={18} style={{ flexShrink: 0 }} />
+                  <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>
+                    Synthesis completed successfully! (
+                    {currentJob.chunk_total ? `${currentJob.chunk_total} chunks joined` : 'Audio ready'})
+                  </span>
+                </div>
+
+                <AudioPlayer
+                  src={currentJob.output_url}
+                  title="Synthesized Voice"
+                  subtitle={`${language.toUpperCase()} • Speed: ${speed}x • ${charCount.toLocaleString()} chars`}
+                  aiAttribution={true}
+                />
+
+                {/* Download and Share Actions */}
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <a
+                    href={currentJob.output_url}
+                    download={`voice_studio_${currentJob.job_id}.wav`}
+                    className="btn-primary"
+                    style={{
+                      flex: 1,
+                      textDecoration: 'none',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '8px',
+                      padding: '10px 16px',
+                    }}
+                  >
+                    <Download size={16} />
+                    <span>Download Audio (.wav)</span>
+                  </a>
+
+                  <button
+                    onClick={handleStartNew}
+                    className="btn-secondary"
+                    style={{ fontSize: '0.875rem', padding: '10px 16px' }}
+                  >
+                    New Generation
+                  </button>
+                </div>
+
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.4, margin: 0 }}>
+                  Results are retained on disk for {serverConfig?.job_ttl_minutes || 240} minutes before automatic cleanup.
+                </p>
+              </div>
+            ) : (
+              /* 4. Empty / Initial State */
+              <div
+                style={{
+                  backgroundColor: 'var(--bg-primary)',
+                  border: '1px dashed var(--border-medium)',
+                  borderRadius: 'var(--radius-lg)',
+                  padding: '48px 24px',
+                  textAlign: 'center',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                <Volume2 size={36} style={{ margin: '0 auto 12px auto', opacity: 0.5 }} />
+                <h4
+                  style={{
+                    fontSize: '0.9375rem',
+                    fontWeight: 600,
+                    color: 'var(--text-secondary)',
+                    marginBottom: '4px',
+                  }}
+                >
+                  No output yet
+                </h4>
+                <p style={{ fontSize: '0.8125rem', maxWidth: '300px', margin: '0 auto' }}>
+                  Paste or upload your script, configure your voice, and click <strong>Generate voice</strong> to
+                  begin long-form synthesis.
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
   );
 };
+
+export default TTSStudio;

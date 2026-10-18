@@ -3,7 +3,7 @@ Response data contracts for voice catalog, configuration, and health endpoints.
 """
 
 from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class HealthResponse(BaseModel):
@@ -22,6 +22,8 @@ class VoiceResponse(BaseModel):
 
     Omits all internal filesystem paths and asset file locations.
     """
+
+    model_config = ConfigDict(protected_namespaces=())
 
     id: str = Field(..., description="Unique voice identifier slug")
     name: str = Field(..., description="Human-readable voice display name")

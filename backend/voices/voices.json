@@ -1,37 +1,20 @@
 [
   {
-    "id": "my_voice",
-    "name": "My Voice",
-    "description": "Operator reference voice for multilingual speech synthesis and cloning",
+    "id": "client_ref",
+    "name": "Client Voice",
+    "description": "Client-provided reference voice for Hindi and multilingual speech synthesis and cloning",
     "style": "conversational",
     "languages": [
-      "en",
       "hi",
+      "en",
       "mr"
     ],
     "model_type": "openvoice_reference",
-    "preview_file": "previews/my_voice_preview.wav",
-    "asset_file": "reference/my_voice.wav",
-    "license": "Owner's own voice, recorded and provided by the operator",
-    "usage_permission": "Authorized by operator for local studio synthesis",
+    "preview_file": "previews/client_ref_preview.wav",
+    "asset_file": "reference/client_ref.wav",
+    "license": "Client-provided reference. Written permission from the speaker required before delivery.",
+    "usage_permission": "Authorized by client for local studio synthesis",
     "status": "available",
-    "limitations": "Supports English, Hindi, and Marathi. Optimized for clean conversational speech."
-  },
-  {
-    "id": "nttsai",
-    "name": "NttsAI",
-    "description": "Experimental RVC voice conversion model",
-    "style": "anime",
-    "languages": [
-      "en",
-      "ja"
-    ],
-    "model_type": "rvc_model",
-    "preview_file": null,
-    "asset_file": "rvc_models/checkpoints/NttsAI.pth",
-    "license": "Apache 2.0 (unverified training provenance)",
-    "usage_permission": "Local experimental research only; not for public release or commercial use",
-    "status": "experimental",
-    "limitations": "Experimental checkpoint with unverified training dataset; sensitive to input pitch."
+    "limitations": "Supports Hindi, English, and Marathi conversational speech from client studio reference."
   }
 ]

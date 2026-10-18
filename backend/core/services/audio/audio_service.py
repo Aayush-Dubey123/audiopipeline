@@ -367,6 +367,156 @@ class AudioService:
             logging.error(f"Error in AudioService.add_ai_label_metadata: {error.stderr}")
             raise AudioProcessingError(f"Metadata tagging failed: {error.stderr}")
 
+    @classmethod
+    def join_chunks_ffmpeg(
+        cls,
+        chunk_paths: list,
+        output_path: Path,
+        pause_sentence_ms: int = 250,
+        pause_paragraph_ms: int = 600,
+        paragraph_boundary_indices: Optional[set] = None,
+        sample_rate: int = 24000,
+        timeout: int = 300,
+    ) -> Path:
+        """
+        Concatenate synthesis chunk WAV files using the ffmpeg concat demuxer.
+
+        A silence clip of pause_sentence_ms is inserted between every pair of chunks.
+        If paragraph_boundary_indices is supplied, the pause before that chunk index
+        is extended to pause_paragraph_ms instead.
+
+        All chunk files must share the same sample rate and channel count. The
+        function writes a temporary concat list file in the same directory as
+        output_path and removes it after ffmpeg completes.
+
+        Args:
+            chunk_paths (list): Ordered list of Path objects pointing to chunk WAVs.
+            output_path (Path): Destination path for the joined WAV file.
+            pause_sentence_ms (int): Silence duration between sentence chunks (ms).
+            pause_paragraph_ms (int): Silence duration at paragraph boundaries (ms).
+            paragraph_boundary_indices (Optional[set]): Set of chunk indices that start
+                a new paragraph (receive the longer pause before them).
+            sample_rate (int): Common sample rate for all chunks (default 24000).
+            timeout (int): Subprocess timeout in seconds.
+
+        Returns:
+            Path: Path to the joined output WAV file.
+
+        Raises:
+            FFmpegNotFoundError: If ffmpeg is missing.
+            AudioProcessingError: If chunk list is empty or ffmpeg concatenation fails.
+        """
+        cls._check_ffmpeg_tool("ffmpeg")
+        logging.info(
+            "Executing AudioService.join_chunks_ffmpeg: %d chunks -> %s",
+            len(chunk_paths),
+            output_path.name,
+        )
+
+        if not chunk_paths:
+            raise AudioProcessingError("Cannot join an empty chunk list.")
+
+        para_indices = paragraph_boundary_indices or set()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        silence_cache: dict = {}
+
+        def _silence_wav(duration_ms: int) -> Path:
+            if duration_ms in silence_cache:
+                return silence_cache[duration_ms]
+            sil_path = output_path.parent / f"_silence_{duration_ms}ms.wav"
+            duration_s = duration_ms / 1000.0
+            cmd_sil = [
+                "ffmpeg", "-y",
+                "-f", "lavfi",
+                "-i", f"anullsrc=r={sample_rate}:cl=mono:d={duration_s:.3f}",
+                "-ar", str(sample_rate),
+                "-ac", "1",
+                str(sil_path),
+            ]
+            result = subprocess.run(cmd_sil, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                raise AudioProcessingError(
+                    f"Failed to generate {duration_ms}ms silence clip: {result.stderr}"
+                )
+            silence_cache[duration_ms] = sil_path
+            return sil_path
+
+        list_path = output_path.parent / "_concat_list.txt"
+        try:
+            with open(list_path, "w", encoding="utf-8") as fh:
+                for idx, chunk_path in enumerate(chunk_paths):
+                    escaped_chunk = str(chunk_path).replace("'", "'\\''")
+                    fh.write(f"file '{escaped_chunk}'\n")
+                    if idx < len(chunk_paths) - 1:
+                        pause_ms = (
+                            pause_paragraph_ms
+                            if (idx + 1) in para_indices
+                            else pause_sentence_ms
+                        )
+                        sil = _silence_wav(pause_ms)
+                        escaped_sil = str(sil).replace("'", "'\\''")
+                        fh.write(f"file '{escaped_sil}'\n")
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_path),
+                "-ar", str(sample_rate),
+                "-ac", "1",
+                "-c:a", "pcm_s16le",
+                str(output_path),
+            ]
+
+            subprocess.run(
+                cmd, capture_output=True, text=True, check=True, timeout=timeout
+            )
+            logging.info(
+                "AudioService.join_chunks_ffmpeg completed: %s (%d bytes)",
+                output_path.name,
+                output_path.stat().st_size,
+            )
+            return output_path
+
+        except subprocess.CalledProcessError as error:
+            logging.error(f"Error in AudioService.join_chunks_ffmpeg: {error.stderr}")
+            raise AudioProcessingError(f"Chunk concatenation failed: {error.stderr}")
+        finally:
+            if list_path.exists():
+                list_path.unlink(missing_ok=True)
+            for sil in silence_cache.values():
+                sil.unlink(missing_ok=True)
+
+    @staticmethod
+    def check_free_disk_gb(path: Path, required_gb: float = 1.0) -> None:
+        """
+        Verify that sufficient free disk space is available before starting a long job.
+
+        Args:
+            path (Path): Directory to check for free space.
+            required_gb (float): Minimum required free gigabytes (default 1.0).
+
+        Returns:
+            None
+
+        Raises:
+            AudioProcessingError: If free space is below required_gb.
+        """
+        import shutil as _shutil
+        total, used, free = _shutil.disk_usage(str(path))
+        free_gb = free / (1024 ** 3)
+        logging.info(
+            "Disk space check at %s: %.2f GB free (required %.2f GB)",
+            path, free_gb, required_gb,
+        )
+        if free_gb < required_gb:
+            raise AudioProcessingError(
+                f"Insufficient disk space: {free_gb:.2f} GB free, "
+                f"{required_gb:.2f} GB required. Free up space and retry."
+            )
+
 
 if __name__ == "__main__":
     """

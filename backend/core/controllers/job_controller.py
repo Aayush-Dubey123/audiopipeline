@@ -66,6 +66,28 @@ class JobController:
                 detail=f"You already have {active_count} active job(s) in progress. Please wait for completion before submitting more.",
             )
 
+    @staticmethod
+    def _check_client_daily_quota(db: Session, client_key: str) -> None:
+        """
+        Verify that a client has not exceeded their daily generated audio minutes cap.
+
+        Args:
+            db (Session): Active database session.
+            client_key (str): Hashed client identifier token.
+
+        Raises:
+            HTTPException 429: If daily quota is exceeded.
+        """
+        daily_minutes = JobCRUD.get_daily_generated_minutes(db=db, client_key=client_key)
+        if daily_minutes >= settings.CLIENT_DAILY_MINUTES:
+            logging.warning(
+                f"Client '{client_key}' exceeded daily quota ({daily_minutes:.1f}/{settings.CLIENT_DAILY_MINUTES} min)"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Daily audio generation quota reached ({daily_minutes:.1f}/{settings.CLIENT_DAILY_MINUTES} minutes used in last 24h). Please try again tomorrow.",
+            )
+
     @classmethod
     def create_tts_job(
         cls,
@@ -90,6 +112,7 @@ class JobController:
         """
         logging.info(f"Executing JobController.create_tts_job for voice '{request.voice_id}' (lang={request.language})")
         cls._check_client_active_job_quota(db=db, client_key=client_key)
+        cls._check_client_daily_quota(db=db, client_key=client_key)
 
         voice = VoiceCRUD.get_voice_by_id(db=db, voice_id=request.voice_id)
         if not voice:
@@ -202,6 +225,7 @@ class JobController:
             )
 
         cls._check_client_active_job_quota(db=db, client_key=client_key)
+        cls._check_client_daily_quota(db=db, client_key=client_key)
 
         clean_text = text.strip()
         if not clean_text:
@@ -484,7 +508,11 @@ class JobController:
             progress_message=job.progress_message,
             error_code=job.error_code,
             error_message=job.error_message,
+            chunk_done=job.chunk_done,
+            chunk_total=job.chunk_total,
+            eta_seconds=job.eta_seconds,
             created_at=job.created_at,
+            completed_at=job.completed_at,
             expires_at=job.expires_at,
             output_url=output_url,
             source_url=source_url,
@@ -644,4 +672,101 @@ class JobController:
             job_id=job_id,
             status="deleted",
             message=f"Job '{job_id}' and all associated audio artifacts were deleted.",
+        )
+
+    @classmethod
+    def resume_job(
+        cls,
+        db: Session,
+        client_key: str,
+        job_id: str,
+    ) -> JobCreatedResponse:
+        """
+        Resume a failed or interrupted long-form inference job.
+
+        Args:
+            db (Session): Active database session.
+            client_key (str): Client (hashed IP).
+            job_id (str): Unique job identifier token.
+
+        Returns:
+            JobCreatedResponse: Queued status confirmation.
+
+        Raises:
+            HTTPException 400: If job is already completed or invalid kind.
+            HTTPException 404: If job does not exist.
+            HTTPException 429: If queue is full or quotas are exceeded.
+        """
+        logging.info(f"Executing JobController.resume_job for job '{job_id}'")
+        job = JobCRUD.get_job_by_id(db=db, job_id=job_id)
+        if not job:
+            logging.warning(f"Resume rejected: job '{job_id}' not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Job '{job_id}' was not found.",
+            )
+
+        if job.status == "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Job is already completed.",
+            )
+        if job.status == "processing":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Job is currently processing.",
+            )
+
+        if job.kind not in ("tts", "tts_custom"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Job kind '{job.kind}' does not support resuming.",
+            )
+
+        cls._check_client_active_job_quota(db=db, client_key=client_key)
+        cls._check_client_daily_quota(db=db, client_key=client_key)
+
+        job_dir = (settings.tmp_path / job_id).resolve()
+        chunks_dir = job_dir / "chunks"
+
+        if chunks_dir.exists():
+            for part_file in chunks_dir.glob("*.part"):
+                part_file.unlink(missing_ok=True)
+            finished_chunks = [
+                p for p in chunks_dir.glob("chunk_*.wav") if p.stat().st_size > 44
+            ]
+            finished_count = len(finished_chunks)
+        else:
+            finished_count = 0
+
+        JobCRUD.update_job_status(
+            db=db,
+            job_id=job_id,
+            status="queued",
+            progress_message=f"Resuming job from chunk {finished_count}...",
+            error_code=None,
+            error_message=None,
+        )
+
+        try:
+            job_worker.enqueue_job(job_id)
+        except QueueFullError as q_err:
+            JobCRUD.update_job_status(
+                db=db,
+                job_id=job_id,
+                status="failed",
+                error_code="QUEUE_FULL",
+                error_message=str(q_err),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=str(q_err),
+            )
+
+        return JobCreatedResponse(
+            job_id=job_id,
+            kind=job.kind,
+            status="queued",
+            message=f"Job resumed successfully from chunk {finished_count}.",
+            ai_generated=True,
         )

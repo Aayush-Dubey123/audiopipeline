@@ -691,3 +691,88 @@ def test_validation_service_inspect_reference_quality(temp_audio_dir: Path) -> N
     with pytest.raises(ReferenceQualityError, match="too short"):
         ValidationService.inspect_reference_audio_quality(short_wav, min_duration=3.0)
 
+
+# ==============================================================================
+# SECTION 7: TEXT SPLITTER & MULTILINGUAL INPUT VALIDATION TESTS
+# ==============================================================================
+
+
+def test_splitter_devanagari_boundaries() -> None:
+    """
+    Verify text splitter correctly segments Hindi/Devanagari text at purna viram (। and ॥).
+    """
+    from core.services.pipelines.openvoice_service import split_text_with_boundaries
+
+    hi_text = (
+        "नमस्ते! आज हम आर्टिफिशियल इंटेलिजेंस के बारे में बात करेंगे। "
+        "यह तकनीक शब्दों को आवाज़ में बदलती है॥ "
+        "तीसरा वाक्य यहाँ समाप्त होता है।"
+    )
+    chunks, para_starts = split_text_with_boundaries(hi_text, max_chars=65)
+    assert len(chunks) == 3
+    for chunk in chunks:
+        assert len(chunk) <= 65
+        # Ensure Devanagari characters are intact
+        assert any("\u0900" <= c <= "\u097F" for c in chunk)
+
+
+def test_splitter_abbreviations_and_decimals() -> None:
+    """
+    Verify text splitter does NOT split at known abbreviations (Dr., Mr., etc.) or decimal numbers.
+    """
+    from core.services.pipelines.openvoice_service import split_text_with_boundaries
+
+    text = "Dr. Smith met with Mr. Jones at 1.5 miles past the clinic. They agreed on 99.9 percent of the points."
+    chunks, _ = split_text_with_boundaries(text, max_chars=200)
+    # The whole paragraph should remain a single chunk because none of the periods are true sentence ends
+    assert len(chunks) == 1
+    assert "Dr. Smith" in chunks[0]
+    assert "Mr. Jones" in chunks[0]
+    assert "1.5" in chunks[0]
+    assert "99.9" in chunks[0]
+
+
+def test_splitter_very_long_sentences_no_midword_cuts() -> None:
+    """
+    Verify very long sentences without sentence punctuation are split at whitespace boundaries,
+    ensuring words are never cut in half and every chunk is strictly within max_chars.
+    """
+    from core.services.pipelines.openvoice_service import split_text_with_boundaries
+
+    # 300 words without any period, question mark, or exclamation mark
+    words = [f"word{i:03d}" for i in range(300)]
+    long_text = " ".join(words)
+    max_c = 120
+
+    chunks, _ = split_text_with_boundaries(long_text, max_chars=max_c)
+    assert len(chunks) > 1
+
+    reconstructed_words = []
+    for chunk in chunks:
+        assert len(chunk) <= max_c
+        chunk_words = chunk.split()
+        reconstructed_words.extend(chunk_words)
+        # Verify no word is truncated (each word must match wordXXX)
+        for w in chunk_words:
+            assert w.startswith("word") and len(w) == 7, f"Corrupted word: '{w}'"
+
+    # All 300 words must be present in exact order
+    assert reconstructed_words == words
+
+
+def test_hindi_input_validation_devanagari_vs_hinglish() -> None:
+    """
+    Verify prepare_hindi_text allows native Devanagari and rejects Latin / Hinglish text.
+    """
+    from core.services.pipelines.openvoice_service import prepare_hindi_text
+
+    # 1. Native Devanagari passes
+    valid_devanagari = "यह एक मान्य देवनागरी वाक्य है।"
+    assert prepare_hindi_text(valid_devanagari) == valid_devanagari
+
+    # 2. Romanized Hinglish raises ValueError
+    hinglish_text = "Yeh ek romanized Hinglish sentence hai jo accept nahi hona chahiye."
+    with pytest.raises(ValueError, match="Devanagari"):
+        prepare_hindi_text(hinglish_text)
+
+

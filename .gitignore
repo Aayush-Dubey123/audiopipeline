@@ -30,6 +30,8 @@ __pycache__/
 # Python virtual environments
 venv/
 .venv/
+.venv*/
+*_venv/
 env/
 ENV/
 
@@ -91,7 +93,8 @@ backend/voices/rvc_models/
 *.m4a
 
 # Keep official voice library reference and preview assets
-!backend/voices/reference/my_voice.wav
-!backend/voices/previews/my_voice_preview.wav
+!backend/voices/reference/client_ref.wav
+!backend/voices/reference/client_ref.txt
+!backend/voices/reference/script.txt
 
 

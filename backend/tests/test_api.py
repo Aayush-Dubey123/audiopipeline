@@ -4,6 +4,7 @@ API and integration test suite for AI Voice Studio core endpoints.
 
 import pytest
 from pathlib import Path
+from sqlalchemy.orm import Session
 from starlette.testclient import TestClient
 from core.apis.api import app
 
@@ -95,13 +96,13 @@ def test_list_voices_returns_registered_voices_and_masks_asset_paths() -> None:
         assert payload["total"] >= 1
 
         voice_ids = [v["id"] for v in payload["voices"]]
-        assert "my_voice" in voice_ids
+        assert "client_ref" in voice_ids
         # Experimental voice must not be listed by default
         assert "nttsai" not in voice_ids
 
         for voice in payload["voices"]:
             assert "asset_file" not in voice
-            assert "reference/my_voice.wav" not in str(voice)
+            assert "reference/client_ref.wav" not in str(voice)
             assert "checkpoints" not in str(voice)
             assert "voices/" not in str(voice)
 
@@ -111,14 +112,14 @@ def test_get_voice_by_id_success() -> None:
     Verify GET /v1/voices/{id} returns profile details for an available voice.
     """
     with TestClient(app) as test_client:
-        response = test_client.get("/v1/voices/my_voice")
+        response = test_client.get("/v1/voices/client_ref")
         assert response.status_code == 200
         payload = response.json()
 
-        assert payload["id"] == "my_voice"
-        assert payload["name"] == "My Voice"
+        assert payload["id"] == "client_ref"
+        assert payload["name"] == "Client Voice"
         assert payload["model_type"] == "openvoice_reference"
-        assert payload["has_preview"] is True
+        assert payload["has_preview"] is False
         assert "asset_file" not in payload
 
 
@@ -136,13 +137,30 @@ def test_get_experimental_voice_returns_404_by_default() -> None:
 
 def test_get_voice_preview_streams_audio() -> None:
     """
-    Verify GET /v1/voices/{id}/preview returns streaming WAV audio for my_voice.
+    Verify GET /v1/voices/{id}/preview returns streaming WAV audio for client_ref using generated tone.
     """
-    with TestClient(app) as test_client:
-        response = test_client.get("/v1/voices/my_voice/preview")
-        assert response.status_code == 200
-        assert "audio/wav" in response.headers.get("Content-Type", "")
-        assert len(response.content) > 1000
+    import soundfile as sf
+    import numpy as np
+    from core.config import get_settings
+    settings = get_settings()
+
+    preview_dir = settings.voices_path / "previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = preview_dir / "client_ref_preview.wav"
+    sr = 22050
+    t = np.linspace(0, 1.0, sr, endpoint=False)
+    tone = 0.5 * np.sin(2 * np.pi * 440 * t)
+    sf.write(str(preview_path), tone, sr)
+
+    try:
+        with TestClient(app) as test_client:
+            response = test_client.get("/v1/voices/client_ref/preview")
+            assert response.status_code == 200
+            assert "audio/wav" in response.headers.get("Content-Type", "")
+            assert len(response.content) > 1000
+    finally:
+        if preview_path.exists():
+            preview_path.unlink()
 
 
 def test_get_voice_preview_for_experimental_returns_404() -> None:
@@ -212,7 +230,7 @@ def test_get_job_status_success_and_output_urls() -> None:
             {
                 "id": token,
                 "kind": "tts",
-                "voice_id": "my_voice",
+                "voice_id": "client_ref",
                 "status": "completed",
                 "progress_message": "Completed test job",
                 "client_key": "hashed_client_key_123",
@@ -278,7 +296,7 @@ def test_get_audio_output_wav_and_mp3(tmp_path: Path) -> None:
             {
                 "id": token,
                 "kind": "tts",
-                "voice_id": "my_voice",
+                "voice_id": "client_ref",
                 "status": "completed",
                 "client_key": "hashed_client_key_123",
                 "expires_at": expires,
@@ -326,7 +344,7 @@ def test_get_audio_output_rejected_when_not_completed() -> None:
             {
                 "id": token,
                 "kind": "tts",
-                "voice_id": "my_voice",
+                "voice_id": "client_ref",
                 "status": "processing",
                 "client_key": "hashed_client_key_123",
                 "expires_at": expires,
@@ -367,7 +385,7 @@ def test_delete_job_endpoint() -> None:
             {
                 "id": token,
                 "kind": "tts",
-                "voice_id": "my_voice",
+                "voice_id": "client_ref",
                 "status": "completed",
                 "client_key": "hashed_client_key_123",
                 "expires_at": expires,
@@ -416,7 +434,7 @@ def test_create_tts_job_unsupported_language_returns_400() -> None:
     with TestClient(app) as test_client:
         response = test_client.post(
             "/v1/tts",
-            json={"text": "Bonjour le monde", "voice_id": "my_voice", "language": "fr"},
+            json={"text": "Bonjour le monde", "voice_id": "client_ref", "language": "fr"},
         )
         assert response.status_code == 400
         payload = response.json()
@@ -448,7 +466,7 @@ def test_create_tts_job_success_enqueues_job(monkeypatch: pytest.MonkeyPatch) ->
     with TestClient(app) as test_client:
         response = test_client.post(
             "/v1/tts",
-            json={"text": "Testing production voice studio pipeline.", "voice_id": "my_voice", "language": "en"},
+            json={"text": "Testing production voice studio pipeline.", "voice_id": "client_ref", "language": "en"},
         )
         assert response.status_code == 202
         payload = response.json()
@@ -568,6 +586,233 @@ def test_create_vc_job_success(monkeypatch: pytest.MonkeyPatch) -> None:
         payload = response.json()
         assert payload["status"] == "queued"
         assert "job_id" in payload
+
+
+def test_job_status_chunk_progress_fields() -> None:
+    """
+    Verify GET /v1/jobs/{job_id} exposes chunk_done, chunk_total, eta_seconds, and completed_at.
+    """
+    from datetime import datetime, timezone
+    from core.models.job_model import JobModel
+    from core.cruds.job_crud import JobCRUD
+    from core.database.database import SessionLocal
+
+    import uuid
+    job_id = f"test_prog_{uuid.uuid4().hex[:8]}"
+    job_data = {
+        "id": job_id,
+        "kind": "tts",
+        "voice_id": "client_ref",
+        "status": "processing",
+        "client_key": "test_client_hash",
+        "progress_message": "Synthesising chunk 2 of 5",
+        "expires_at": datetime.now(timezone.utc),
+    }
+
+    with TestClient(app) as test_client:
+        db = SessionLocal()
+        try:
+            JobCRUD.create_job(db, job_data)
+            JobCRUD.update_chunk_progress(db, job_id=job_id, chunk_done=2, chunk_total=5, eta_seconds=42)
+        finally:
+            db.close()
+
+        response = test_client.get(f"/v1/jobs/{job_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["job_id"] == job_id
+        assert payload["chunk_done"] == 2
+        assert payload["chunk_total"] == 5
+        assert payload["eta_seconds"] == 42
+        assert payload["status"] == "processing"
+
+
+def test_client_daily_quota_exceeded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify POST /v1/tts rejects submission with HTTP 429 when client (hashed IP) exceeds daily minutes quota.
+    """
+    from unittest.mock import MagicMock
+    from core.cruds.job_crud import JobCRUD
+    from core.cruds.voice_crud import VoiceCRUD
+
+    mock_voice = MagicMock()
+    mock_voice.id = "client_ref"
+    mock_voice.name = "Client Voice"
+    mock_voice.status = "available"
+    mock_voice.model_type = "openvoice_reference"
+    mock_voice.languages = ["en"]
+    monkeypatch.setattr(VoiceCRUD, "get_voice_by_id", lambda db, voice_id=None, **kwargs: mock_voice)
+
+    # Mock client daily usage to 135 minutes (over the 120 min cap)
+    monkeypatch.setattr(JobCRUD, "get_daily_generated_minutes", lambda db, client_key: 135.0)
+
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts",
+            json={"voice_id": "client_ref", "text": "This should be blocked by quota.", "language": "en"},
+        )
+        assert response.status_code == 429
+        body = response.json()
+        error_msg = body.get("detail") or body.get("error", {}).get("message", "")
+        assert "Daily audio generation quota reached" in error_msg
+
+
+def test_resume_job_endpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """
+    Verify POST /v1/jobs/{job_id}/resume validates state, clears error, and requeues the job.
+    """
+    import uuid
+    from datetime import datetime, timezone
+    from core.cruds.job_crud import JobCRUD
+    from core.controllers.job_controller import job_worker, settings
+    from core.database.database import SessionLocal
+
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id: None)
+    monkeypatch.setattr(settings, "TMP_DIR", str(tmp_path))
+
+    job_id = f"test_res_{uuid.uuid4().hex[:8]}"
+    job_dir = tmp_path / job_id
+    chunks_dir = job_dir / "chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create 2 finished chunk files
+    (chunks_dir / "chunk_0000.wav").write_bytes(b"RIFF" + b"\x00" * 100)
+    (chunks_dir / "chunk_0001.wav").write_bytes(b"RIFF" + b"\x00" * 100)
+    # And 1 partial file that should be cleaned
+    (chunks_dir / "chunk_0002.wav.part").write_bytes(b"PARTIAL")
+
+    job_data = {
+        "id": job_id,
+        "kind": "tts",
+        "voice_id": "client_ref",
+        "status": "failed",
+        "client_key": "test_client_hash",
+        "progress_message": "Inference failed.",
+        "error_code": "INFERENCE_FAILED",
+        "error_message": "GPU OOM",
+        "chunk_done": 2,
+        "chunk_total": 4,
+        "expires_at": datetime.now(timezone.utc),
+    }
+
+    with TestClient(app) as test_client:
+        db = SessionLocal()
+        try:
+            JobCRUD.create_job(db, job_data)
+
+            response = test_client.post(f"/v1/jobs/{job_id}/resume")
+            assert response.status_code == 202
+            payload = response.json()
+            assert payload["job_id"] == job_id
+            assert payload["status"] == "queued"
+            assert "from chunk 2" in payload["message"]
+
+            # Incomplete .part must have been cleaned
+            assert not (chunks_dir / "chunk_0002.wav.part").exists()
+            # Finished chunks must be preserved
+            assert (chunks_dir / "chunk_0000.wav").exists()
+            assert (chunks_dir / "chunk_0001.wav").exists()
+
+            # Database state must be updated
+            refreshed = JobCRUD.get_job_by_id(db, job_id)
+            assert refreshed.status == "queued"
+            assert refreshed.error_code is None
+            assert refreshed.error_message is None
+        finally:
+            db.close()
+
+
+def test_resume_after_mid_job_crash_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify _run_long_form_tts preserves completed chunks on failure,
+    cleans up incomplete .part files, recomputes speaker embedding on resume,
+    and purges chunk directory only upon successful join.
+    """
+    import soundfile as sf
+    import numpy as np
+    from core.services.jobs.job_worker import _run_long_form_tts
+    from core.services.pipelines.openvoice_service import GenerationResult
+    from core.controllers.job_controller import settings
+
+    job_id = "test_crash_resume_789"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    out_wav = job_dir / "output.wav"
+
+    ref_wav = tmp_path / "ref.wav"
+    sr = 22050
+    t = np.linspace(0, 1.0, sr, endpoint=False)
+    sf.write(str(ref_wav), 0.5 * np.sin(2 * np.pi * 440 * t), sr)
+
+    text = "First paragraph sentence one. First paragraph sentence two.\n\nSecond paragraph here."
+    attempt = {"count": 0}
+    embedding_recomputed = {"value": False}
+
+    class MockOpenVoiceService:
+        def generate(self, text, reference_audio_path, output_path, speed=1.0, language="en", force_recompute_se=False):
+            attempt["count"] += 1
+            if force_recompute_se:
+                embedding_recomputed["value"] = True
+            # Write a valid wav to the requested output path (.part)
+            tone = 0.5 * np.sin(2 * np.pi * 440 * np.linspace(0, 0.5, sr, endpoint=False))
+            sf.write(output_path, tone, sr, format="WAV")
+            if attempt["count"] == 2:
+                # Simulate a mid-job crash during chunk 2
+                raise RuntimeError("Simulated mid-job worker crash!")
+            return GenerationResult(
+                output_path=str(output_path),
+                duration_seconds=0.5,
+                sample_rate=sr,
+                file_size_bytes=1000,
+                base_tts_duration_seconds=0.1,
+                tone_conversion_duration_seconds=0.1,
+                total_duration_seconds=0.2,
+                peak_vram_allocated_mb=100.0,
+                peak_vram_reserved_mb=100.0,
+                watermark_applied=True,
+            )
+
+    monkeypatch.setattr("core.services.pipelines.openvoice_service.OpenVoiceService", MockOpenVoiceService)
+
+    # Run 1: Fails on second chunk
+    chunks_dir = job_dir / "chunks"
+    with pytest.raises(RuntimeError, match="Simulated mid-job worker crash"):
+        _run_long_form_tts(
+            job_id=job_id,
+            text=text,
+            ref_path=ref_wav,
+            out_wav=out_wav,
+            speed=1.0,
+            language="en",
+            job_dir=job_dir,
+        )
+
+    # Verify chunk 0 was completed and preserved
+    assert chunks_dir.exists()
+    assert (chunks_dir / "chunk_0000.wav").exists()
+    # Incomplete .part must have been cleaned up by error handling
+    assert not (chunks_dir / "chunk_0001.wav.part").exists()
+    assert not out_wav.exists()
+
+    # Run 2: Resume (skip chunk 0, synthesize chunk 1, recompute speaker embedding, join, purge chunks)
+    attempt["count"] = 0  # reset so chunk 1 doesn't fail
+    res = _run_long_form_tts(
+        job_id=job_id,
+        text=text,
+        ref_path=ref_wav,
+        out_wav=out_wav,
+        speed=1.0,
+        language="en",
+        job_dir=job_dir,
+    )
+
+    # Assertions
+    assert out_wav.exists()
+    assert res["duration_seconds"] > 0
+    assert embedding_recomputed["value"] is True, "Speaker embedding should be recomputed on resume"
+    # Chunks folder must be purged only after successful join
+    assert not chunks_dir.exists(), "Chunks folder should be purged after successful join"
+
 
 
 

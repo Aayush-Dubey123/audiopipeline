@@ -1,79 +1,98 @@
-import React, { useState, useRef } from 'react';
-import {
-  Mic,
-  Square,
-  Upload,
-  CheckCircle2,
-  AlertCircle,
-  Sliders,
-  Sparkles,
-  Loader2,
-  Info,
-} from 'lucide-react';
-import type { Voice, JobStatusResponse } from '../../lib/types';
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, Mic, RefreshCw, AlertCircle, CheckCircle2, Square, Volume2 } from 'lucide-react';
 import { api, ApiError } from '../../lib/api';
+import type { Voice, JobStatusResponse } from '../../lib/types';
 import { AudioPlayer } from '../common/AudioPlayer';
 
 interface VCStudioProps {
   voices: Voice[];
-  onJobStarted: (jobId: string) => void;
+  onNavigateBack: () => void;
 }
 
-export const VCStudio: React.FC<VCStudioProps> = ({ voices, onJobStarted }) => {
-  // Target voice selection (only rvc_model or available models)
-  const rvcVoices = voices.filter((v) => v.model_type === 'rvc_model');
-  const [selectedVoiceId, setSelectedVoiceId] = useState<string>(
-    rvcVoices[0]?.id || voices[0]?.id || 'my_voice'
-  );
-
-  // Audio input states
+export const VCStudio: React.FC<VCStudioProps> = ({
+  voices,
+  onNavigateBack,
+}) => {
+  // Step 1: Input Audio State
   const [sourceFile, setSourceFile] = useState<File | null>(null);
-  const [sourceBlobUrl, setSourceBlobUrl] = useState<string | null>(null);
+  const [sourceAudioUrl, setSourceAudioUrl] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
 
-  // Pitch shift in semitones (-12 to +12)
+  // Step 2: Voice Out Choice State
+  const rvcVoices = voices.filter((v) => v.model_type === 'rvc_model');
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>(
+    rvcVoices.length > 0 ? rvcVoices[0].id : ''
+  );
   const [pitchShift, setPitchShift] = useState<number>(0);
 
-  // Generation & Status states
-  const [isConverting, setIsConverting] = useState(false);
+  // Step 3: Result & Polling State
   const [currentJob, setCurrentJob] = useState<JobStatusResponse | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Recorder refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const timerIntervalRef = useRef<number | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<number | null>(null);
+  const pollIntervalRef = useRef<number | null>(null);
 
-  // Recording controls
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (sourceAudioUrl) URL.revokeObjectURL(sourceAudioUrl);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (rvcVoices.length > 0 && !rvcVoices.some(v => v.id === selectedVoiceId)) {
+      setSelectedVoiceId(rvcVoices[0].id);
+    }
+  }, [rvcVoices]);
+
+  // Handle File Selection
+  const handleFileChange = (file: File) => {
+    setSourceFile(file);
+    if (sourceAudioUrl) URL.revokeObjectURL(sourceAudioUrl);
+    setSourceAudioUrl(URL.createObjectURL(file));
+  };
+
+  // Microphone recording
   const startRecording = async () => {
     try {
-      setErrorMessage(null);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioChunksRef.current = [];
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
       };
 
       mediaRecorder.onstop = () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        const file = new File([audioBlob], 'mic_source.wav', { type: 'audio/wav' });
-        setSourceFile(file);
-        setSourceBlobUrl(URL.createObjectURL(audioBlob));
+        const recordedFile = new File([audioBlob], 'input_speech.wav', { type: 'audio/wav' });
+        handleFileChange(recordedFile);
         stream.getTracks().forEach((track) => track.stop());
       };
 
-      mediaRecorder.start(250);
+      mediaRecorder.start();
       setIsRecording(true);
       setRecordingSeconds(0);
-      timerIntervalRef.current = window.setInterval(() => {
-        setRecordingSeconds((prev) => prev + 1);
+
+      timerRef.current = window.setInterval(() => {
+        setRecordingSeconds((prev) => {
+          if (prev >= 30) {
+            stopRecording();
+            return 30;
+          }
+          return prev + 1;
+        });
       }, 1000);
     } catch {
-      setErrorMessage('Microphone access denied. Please upload an audio file instead.');
+      setErrorMessage('Microphone access denied or unsupported.');
     }
   };
 
@@ -81,292 +100,383 @@ export const VCStudio: React.FC<VCStudioProps> = ({ voices, onJobStarted }) => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
+      if (timerRef.current) clearInterval(timerRef.current);
     }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setSourceFile(file);
-      setSourceBlobUrl(URL.createObjectURL(file));
-      setErrorMessage(null);
-    }
-  };
-
+  // Submit Voice Conversion Job
   const handleConvert = async () => {
     if (!sourceFile) {
-      setErrorMessage('Please upload or record source audio to convert.');
+      setErrorMessage('Please upload or record an audio file to convert.');
+      return;
+    }
+    if (!selectedVoiceId) {
+      setErrorMessage('No target voice available for voice conversion.');
       return;
     }
 
-    setIsConverting(true);
     setErrorMessage(null);
-    setCurrentJob(null);
+    setIsSubmitting(true);
 
     try {
-      const created = await api.createVCJob({
-        voiceId: selectedVoiceId,
+      const jobCreated = await api.createVCJob({
         file: sourceFile,
+        voiceId: selectedVoiceId,
         pitchShift,
       });
 
-      onJobStarted(created.job_id);
-
-      const finalStatus = await api.pollJob(
-        created.job_id,
-        (progress) => setCurrentJob(progress),
-        1000,
-        120000
-      );
-
-      setCurrentJob(finalStatus);
-      if (finalStatus.status === 'failed') {
-        setErrorMessage(finalStatus.error_message || 'Voice conversion failed.');
+      pollJobStatus(jobCreated.job_id);
+    } catch (err) {
+      setIsSubmitting(false);
+      if (err instanceof ApiError) {
+        setErrorMessage(err.message);
+      } else {
+        setErrorMessage('Failed to queue voice conversion job.');
       }
-    } catch (err: unknown) {
-      const msg = err instanceof ApiError ? err.message : 'Voice conversion job failed.';
-      setErrorMessage(msg);
-    } finally {
-      setIsConverting(false);
     }
   };
 
-  const selectedVoice = voices.find((v) => v.id === selectedVoiceId);
+  const pollJobStatus = (jobId: string) => {
+    if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+
+    const checkStatus = async () => {
+      try {
+        const job = await api.getJobStatus(jobId);
+        setCurrentJob(job);
+
+        if (job.status === 'completed') {
+          setIsSubmitting(false);
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+        } else if (job.status === 'failed') {
+          setIsSubmitting(false);
+          setErrorMessage(job.error_message || 'Voice conversion failed during processing.');
+          if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+        }
+      } catch {
+        // Polling retry
+      }
+    };
+
+    checkStatus();
+    pollIntervalRef.current = window.setInterval(checkStatus, 1500);
+  };
+
+  const isAudioInDone = Boolean(sourceFile);
+  const isResultDone = currentJob?.status === 'completed';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      {/* Headline */}
-      <div>
-        <h2 style={{ fontSize: '1.75rem', fontWeight: 800 }} className="gradient-text">
-          Voice-to-Voice Conversion Studio
-        </h2>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
-          Convert existing spoken speech into a target voice character using high-accuracy pitch extraction (RMVPE).
-        </p>
+    <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '32px 24px' }}>
+      {/* Breadcrumb matching Mockup */}
+      <div style={{ marginBottom: '12px' }}>
+        <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+          <button
+            onClick={onNavigateBack}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              padding: 0,
+              fontFamily: 'inherit',
+              fontSize: '0.875rem',
+            }}
+          >
+            Create
+          </button>
+          {' / Voice to voice'}
+        </span>
       </div>
 
-      <div className="grid-cols-2">
-        {/* Left Column: Source Audio & RVC Controls */}
-        <div className="glass-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {/* Target Voice Selection */}
-          <div>
-            <label style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', display: 'block', marginBottom: '8px' }}>
-              Target Conversion Voice
-            </label>
+      {/* Main Heading */}
+      <h1 style={{ fontSize: '2rem', fontWeight: 800, letterSpacing: '-0.02em', marginBottom: '20px', color: 'var(--text-primary)' }}>
+        Voice to voice
+      </h1>
 
-            {voices.length === 0 ? (
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Loading voice models...</p>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {voices.map((voice) => (
-                  <div
-                    key={voice.id}
-                    onClick={() => setSelectedVoiceId(voice.id)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '12px 16px',
-                      borderRadius: '12px',
-                      background: selectedVoiceId === voice.id ? 'rgba(6, 182, 212, 0.15)' : 'rgba(255, 255, 255, 0.03)',
-                      border: `1px solid ${selectedVoiceId === voice.id ? 'var(--accent-cyan)' : 'var(--border-subtle)'}`,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>{voice.name}</span>
-                        <span className={`badge ${voice.model_type === 'rvc_model' ? 'badge-cyan' : 'badge-violet'}`} style={{ fontSize: '0.65rem' }}>
-                          {voice.model_type === 'rvc_model' ? 'RVC Model' : 'OpenVoice Ref'}
-                        </span>
-                        {voice.status === 'experimental' && (
-                          <span className="badge badge-warning" style={{ fontSize: '0.65rem' }}>Local Only</span>
-                        )}
-                      </div>
-                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                        {voice.description}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+      {/* Stepper Pills matching Mockup */}
+      <div className="stepper-container">
+        <span className={`step-pill ${isAudioInDone ? 'done' : 'active'}`}>
+          {isAudioInDone ? <CheckCircle2 size={15} /> : null}
+          <span>{isAudioInDone ? '1 Audio in done' : '1 Audio in'}</span>
+        </span>
+        <span className={`step-pill ${isResultDone ? 'done' : 'active'}`}>
+          <span>2 Voice out</span>
+        </span>
+        <span className={`step-pill ${isResultDone ? 'done' : 'inactive'}`}>
+          <span>3 Result</span>
+        </span>
+      </div>
 
-          {/* Source Audio Upload / Record Panel */}
-          <div>
-            <label style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', display: 'block', marginBottom: '8px' }}>
-              Source Audio Recording
-            </label>
+      {/* 2-Column Responsive Layout */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1.25fr) minmax(0, 1fr)',
+        gap: '32px',
+        alignItems: 'start',
+      }}>
+        {/* Left Column: Step 1 & Step 2 */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+          {/* Card 1: Audio in */}
+          <div className="studio-card" style={{ padding: '24px' }}>
+            <h2 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '16px' }}>
+              1 · Audio in
+            </h2>
+            <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+              Upload or record speech to convert. Best results with clean speech from one person without background music.
+            </p>
 
             <div style={{
               border: '2px dashed var(--border-medium)',
-              borderRadius: '14px',
-              padding: '20px',
+              borderRadius: 'var(--radius-md)',
+              padding: '24px',
               textAlign: 'center',
-              backgroundColor: 'rgba(10, 12, 18, 0.5)',
+              backgroundColor: 'var(--bg-primary)',
             }}>
-              <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', marginBottom: '14px' }}>
-                <button
-                  onClick={isRecording ? stopRecording : startRecording}
-                  className={`btn ${isRecording ? 'btn-danger' : 'btn-secondary'}`}
-                >
-                  {isRecording ? <Square size={16} /> : <Mic size={16} />}
-                  <span>{isRecording ? `Stop Recording (${recordingSeconds}s)` : 'Record Mic Audio'}</span>
-                </button>
-
-                <label className="btn btn-secondary" style={{ cursor: 'pointer' }}>
-                  <Upload size={16} />
-                  <span>Upload Audio File</span>
-                  <input type="file" accept="audio/*,.wav,.mp3,.m4a,.flac" onChange={handleFileUpload} style={{ display: 'none' }} />
-                </label>
-              </div>
+              <input
+                type="file"
+                accept="audio/wav,audio/mp3,audio/mpeg,audio/ogg,audio/flac"
+                id="vc-upload-file"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    handleFileChange(e.target.files[0]);
+                  }
+                }}
+              />
 
               {sourceFile ? (
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', color: '#22d3ee', fontSize: '0.85rem' }}>
-                  <CheckCircle2 size={16} />
-                  <span>Source: <strong>{sourceFile.name}</strong> ({Math.round(sourceFile.size / 1024)} KB)</span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <CheckCircle2 size={18} color="var(--accent-green-text)" />
+                    <span style={{ fontWeight: 600, fontSize: '0.875rem' }}>{sourceFile.name}</span>
+                    <button
+                      onClick={() => {
+                        setSourceFile(null);
+                        setSourceAudioUrl(null);
+                      }}
+                      style={{ border: 'none', background: 'transparent', color: '#dc2626', cursor: 'pointer', fontSize: '0.8125rem' }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+
+                  {sourceAudioUrl && (
+                    <audio controls src={sourceAudioUrl} style={{ width: '100%', maxWidth: '380px', height: '36px' }} />
+                  )}
                 </div>
               ) : (
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  Upload or record 2 to 60 seconds of clear speech to convert.
-                </p>
-              )}
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px' }}>
+                  <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                    <label
+                      htmlFor="vc-upload-file"
+                      className="btn-secondary"
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <Upload size={16} />
+                      <span>Choose Audio File</span>
+                    </label>
 
-              {sourceBlobUrl && (
-                <div style={{ marginTop: '12px' }}>
-                  <audio src={sourceBlobUrl} controls style={{ height: '32px', width: '100%', maxWidth: '300px' }} />
+                    <button
+                      type="button"
+                      onClick={isRecording ? stopRecording : startRecording}
+                      className="btn-secondary"
+                      style={{
+                        backgroundColor: isRecording ? '#fee2e2' : '#ffffff',
+                        color: isRecording ? '#dc2626' : 'inherit',
+                      }}
+                    >
+                      {isRecording ? <Square size={16} /> : <Mic size={16} />}
+                      <span>{isRecording ? `Recording (${recordingSeconds}s)` : 'Record Mic'}</span>
+                    </button>
+                  </div>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                    Supported formats: WAV, MP3, FLAC (under 30 seconds)
+                  </span>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Pitch Shift Slider */}
-          <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-              <span style={{ fontSize: '0.825rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Sliders size={14} /> Pitch Shift (Semitones)
-              </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '0.825rem', fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan-light)' }}>
-                  {pitchShift > 0 ? `+${pitchShift}` : pitchShift} st
+          {/* Card 2: Voice out */}
+          <div className="studio-card" style={{ padding: '24px' }}>
+            <h2 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '16px' }}>
+              2 · Voice out
+            </h2>
+
+            {/* Clear Message when no RVC target voices exist */}
+            {rvcVoices.length === 0 ? (
+              <div style={{
+                backgroundColor: 'var(--bg-tertiary)',
+                border: '1px solid var(--border-medium)',
+                borderRadius: 'var(--radius-md)',
+                padding: '20px',
+                textAlign: 'left',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+                  <span className="status-pill status-needs-voices" style={{ marginTop: '2px' }}>
+                    Needs more voices
+                  </span>
+                  <div>
+                    <h4 style={{ fontSize: '0.9375rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>
+                      No trained target voices available
+                    </h4>
+                    <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                      Voice-to-voice conversion requires an RVC target voice model checkpoint.
+                      Currently, verified library voices are optimized for text-to-speech. More voice conversion models will appear here as they are added and verified.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {rvcVoices.map((v) => {
+                  const isSelected = selectedVoiceId === v.id;
+                  return (
+                    <div
+                      key={v.id}
+                      onClick={() => setSelectedVoiceId(v.id)}
+                      style={{
+                        border: `1.5px solid ${isSelected ? 'var(--accent-green)' : 'var(--border-subtle)'}`,
+                        backgroundColor: isSelected ? 'var(--accent-green-light)' : '#ffffff',
+                        borderRadius: 'var(--radius-md)',
+                        padding: '16px 18px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <div>
+                        <span style={{ fontWeight: 700, fontSize: '0.9375rem' }}>{v.name}</span>
+                        <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                          {v.description}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Pitch Shift Slider */}
+            <div style={{ marginTop: '20px', paddingTop: '16px', borderTop: '1px solid var(--border-subtle)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8125rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                <span>Pitch shift:</span>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>
+                  {pitchShift > 0 ? `+${pitchShift}` : pitchShift} semitones
                 </span>
-                {pitchShift !== 0 && (
-                  <button onClick={() => setPitchShift(0)} className="btn btn-secondary btn-sm" style={{ padding: '2px 6px', fontSize: '0.7rem' }}>
-                    Reset
-                  </button>
-                )}
+              </div>
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={1}
+                value={pitchShift}
+                disabled={rvcVoices.length === 0}
+                onChange={(e) => setPitchShift(parseInt(e.target.value, 10))}
+                style={{ width: '100%', accentColor: 'var(--accent-green)', cursor: 'pointer' }}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '4px' }}>
+                <span>-12 (Male to Female deep)</span>
+                <span>0 (Default)</span>
+                <span>+12 (Female pitch)</span>
               </div>
             </div>
-            <input
-              type="range"
-              min="-12"
-              max="12"
-              step="1"
-              value={pitchShift}
-              onChange={(e) => setPitchShift(parseInt(e.target.value, 10))}
-              style={{ width: '100%', accentColor: 'var(--accent-cyan)' }}
-            />
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-              <span>-12 (Deeper / Male)</span>
-              <span>0 (Original)</span>
-              <span>+12 (Higher / Female)</span>
+
+            {/* Error Message */}
+            {errorMessage && (
+              <div style={{
+                marginTop: '16px',
+                padding: '12px 14px',
+                backgroundColor: '#fef2f2',
+                border: '1px solid #fee2e2',
+                borderRadius: 'var(--radius-md)',
+                color: '#991b1b',
+                fontSize: '0.875rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+              }}>
+                <AlertCircle size={16} />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {/* Action Button */}
+            <div style={{ marginTop: '24px' }}>
+              <button
+                onClick={handleConvert}
+                disabled={isSubmitting || !sourceFile || rvcVoices.length === 0}
+                className="btn-primary"
+                style={{ width: '100%', padding: '12px 20px', fontSize: '1rem' }}
+              >
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw size={18} className="pulse-dot" />
+                    <span>Converting voice with RVC...</span>
+                  </>
+                ) : (
+                  <span>Convert voice</span>
+                )}
+              </button>
             </div>
           </div>
-
-          {/* Error Message */}
-          {errorMessage && (
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px',
-              padding: '12px 16px',
-              borderRadius: '10px',
-              backgroundColor: 'var(--danger-bg)',
-              border: '1px solid rgba(239, 68, 68, 0.3)',
-              color: '#f87171',
-              fontSize: '0.875rem',
-            }}>
-              <AlertCircle size={18} />
-              <span>{errorMessage}</span>
-            </div>
-          )}
-
-          {/* Submit Button */}
-          <button
-            onClick={handleConvert}
-            disabled={isConverting || !sourceFile}
-            className="btn btn-accent"
-            style={{ width: '100%', padding: '14px', fontSize: '1rem' }}
-          >
-            {isConverting ? (
-              <>
-                <Loader2 size={18} className="animate-spin" />
-                <span>Converting Audio...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles size={18} />
-                <span>Convert Voice</span>
-              </>
-            )}
-          </button>
         </div>
 
-        {/* Right Column: Output & A/B Comparison */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {isConverting && (
-            <div className="glass-panel animate-pulse-glow" style={{ padding: '24px', textAlign: 'center' }}>
-              <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '12px' }}>
-                <Loader2 size={36} color="var(--accent-cyan)" className="animate-spin" />
-              </div>
-              <h3 style={{ fontSize: '1.15rem', fontWeight: 700, marginBottom: '6px' }}>
-                Running Voice Conversion Pipeline
-              </h3>
-              <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                {currentJob?.progress_message || 'Extracting RMVPE pitch contours...'}
-              </p>
-            </div>
-          )}
+        {/* Right Column: Step 3 (Result) */}
+        <div>
+          <div className="studio-card" style={{ padding: '24px' }}>
+            <h2 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '16px' }}>
+              3 · Result
+            </h2>
 
-          {currentJob && currentJob.status === 'completed' && currentJob.output_url ? (
-            <AudioPlayer
-              src={currentJob.output_url}
-              comparisonSrc={sourceBlobUrl || undefined}
-              title={`Converted: ${selectedVoice?.name || 'Target Voice'}`}
-              subtitle="Converted speech using RMVPE neural pitch tracking"
-              wavDownloadUrl={currentJob.output_url}
-              mp3DownloadUrl={`${currentJob.output_url}?format=mp3`}
-              aiAttribution={true}
-            />
-          ) : !isConverting ? (
-            <div className="glass-panel" style={{ padding: '28px', color: 'var(--text-secondary)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
-                <Info size={20} color="var(--accent-cyan)" />
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
-                  How RVC Conversion Works
-                </h3>
+            {isSubmitting ? (
+              <div style={{
+                backgroundColor: '#111815',
+                borderRadius: 'var(--radius-lg)',
+                padding: '48px 24px',
+                textAlign: 'center',
+                color: '#ffffff',
+                border: '1px solid #23312a',
+              }}>
+                <RefreshCw size={28} className="pulse-dot" style={{ margin: '0 auto 16px auto', display: 'block', color: '#2dd4bf' }} />
+                <h4 style={{ fontSize: '1rem', fontWeight: 600, marginBottom: '6px' }}>Converting Voice...</h4>
+                <p style={{ fontSize: '0.8125rem', color: '#a3b8b0' }}>
+                  {currentJob?.progress_message || 'Extracting RMVPE pitch and synthesizing with RVC...'}
+                </p>
               </div>
-              <ul style={{ paddingLeft: '20px', fontSize: '0.875rem', lineHeight: 1.8, display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <li>
-                  <strong>Neural Pitch Extraction:</strong> Extracts fundamental frequency ($F_0$) using a pre-trained RMVPE deep learning network.
-                </li>
-                <li>
-                  <strong>A/B Comparison:</strong> Compare the source recording with the synthesized voice track side by side using the player.
-                </li>
-                <li>
-                  <strong>Pitch Adjustment:</strong> If converting male-to-female speech, shift +12 semitones. For female-to-male speech, shift -12 semitones.
-                </li>
-                <li>
-                  <strong>Mutual GPU Unloading:</strong> Heavy RVC and OpenVoice models are automatically unloaded when not in use to preserve VRAM below 2GB.
-                </li>
-              </ul>
-            </div>
-          ) : null}
+            ) : currentJob?.status === 'completed' && currentJob.output_url ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <AudioPlayer
+                  src={currentJob.output_url}
+                  comparisonSrc={sourceAudioUrl || undefined}
+                  comparisonLabel="Input Audio"
+                  title="Converted Voice"
+                  subtitle={`Target: ${selectedVoiceId} • Pitch: ${pitchShift > 0 ? `+${pitchShift}` : pitchShift}`}
+                  aiAttribution={true}
+                />
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                  Results are deleted automatically after the retention period. Do not use voices you do not have permission for.
+                </p>
+              </div>
+            ) : (
+              <div style={{
+                backgroundColor: 'var(--bg-primary)',
+                border: '1px dashed var(--border-medium)',
+                borderRadius: 'var(--radius-lg)',
+                padding: '48px 24px',
+                textAlign: 'center',
+                color: 'var(--text-muted)',
+              }}>
+                <Volume2 size={32} style={{ margin: '0 auto 12px auto', opacity: 0.5 }} />
+                <h4 style={{ fontSize: '0.9375rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  No output yet
+                </h4>
+                <p style={{ fontSize: '0.8125rem' }}>
+                  Your converted audio will appear here after clicking <strong>Convert voice</strong>.
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>

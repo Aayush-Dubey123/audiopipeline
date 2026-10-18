@@ -47,6 +47,10 @@ export interface JobStatusResponse {
   expires_at: string;
   output_url?: string | null;
   source_url?: string | null;
+  chunk_done?: number | null;
+  chunk_total?: number | null;
+  eta_seconds?: number | null;
+  completed_at?: string | null;
 }
 
 export interface TextCleanupResponse {
@@ -63,13 +67,14 @@ export interface HealthResponse {
 }
 
 export interface PublicConfigResponse {
-  version: string;
-  allowed_languages: string[];
-  max_upload_mb: number;
-  max_audio_seconds: number;
   max_text_chars: number;
   job_ttl_minutes: number;
-  openvoice_watermark_enabled: boolean;
+  queue_max_size: number;
+  job_timeout_seconds: number;
+  max_audio_seconds: number;
+  max_upload_mb: number;
+  expose_experimental_voices: boolean;
+  features: Record<string, boolean>;
 }
 
-export type ActiveTab = 'tts' | 'vc' | 'catalog' | 'history';
+export type ActiveTab = 'start' | 'tts' | 'vc' | 'voices' | 'history';

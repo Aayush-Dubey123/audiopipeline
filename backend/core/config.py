@@ -60,12 +60,22 @@ class Settings(BaseSettings):
 
     MAX_UPLOAD_MB: int = Field(default=25, description="Maximum permitted upload size in megabytes")
     MAX_AUDIO_SECONDS: int = Field(default=120, description="Maximum audio length in seconds")
-    MAX_TEXT_CHARS: int = Field(default=1000, description="Maximum script text character count")
+    MAX_TEXT_CHARS: int = Field(default=30000, description="Maximum script text character count (long-form enabled)")
 
-    JOB_TTL_MINUTES: int = Field(default=60, description="Job artifact retention time in minutes")
+    # Long-form chunk pipeline settings
+    CHUNK_MAX_CHARS: int = Field(default=1000, description="Maximum characters per synthesis chunk")
+    CHUNK_PAUSE_SENTENCE_MS: int = Field(default=250, description="Silence gap between sentence chunks in milliseconds")
+    CHUNK_PAUSE_PARAGRAPH_MS: int = Field(default=600, description="Silence gap between paragraph chunks in milliseconds")
+    CHUNK_TIMEOUT_SECONDS: int = Field(default=120, description="Timeout per individual synthesis chunk in seconds")
+    JOB_MAX_SECONDS: int = Field(default=7200, description="Absolute wall-clock limit for a single job (2 hours)")
+
+    JOB_TTL_MINUTES: int = Field(default=240, description="Job artifact retention time in minutes, counted from job completion")
     QUEUE_MAX_SIZE: int = Field(default=10, description="Maximum queue capacity for inference jobs")
-    JOB_TIMEOUT_SECONDS: int = Field(default=180, description="Timeout per job in seconds")
+    JOB_TIMEOUT_SECONDS: int = Field(default=180, description="Legacy single-call timeout in seconds (kept for VC jobs)")
     RATE_LIMIT_PER_MINUTE: int = Field(default=10, description="Max requests permitted per minute per IP")
+
+    # Per-client generation cap
+    CLIENT_DAILY_MINUTES: int = Field(default=120, description="Maximum generated audio minutes per client (hashed IP) per day")
 
     GROQ_API_KEY: str = Field(default="", description="Optional Groq API key")
     GEMINI_API_KEY: str = Field(default="", description="Optional Gemini API key")

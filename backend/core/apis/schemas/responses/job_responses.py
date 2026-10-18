@@ -32,7 +32,11 @@ class JobStatusResponse(BaseModel):
     error_code: Optional[str] = Field(default=None, description="Standardized error code if failed")
     error_message: Optional[str] = Field(default=None, description="Human-readable error explanation if failed")
     created_at: datetime = Field(..., description="Job creation UTC timestamp")
+    completed_at: Optional[datetime] = Field(default=None, description="Job completion UTC timestamp")
     expires_at: datetime = Field(..., description="Job artifact expiry UTC timestamp")
+    chunk_done: Optional[int] = Field(default=None, description="Completed chunk count for long-form synthesis jobs")
+    chunk_total: Optional[int] = Field(default=None, description="Total planned chunks for long-form synthesis jobs")
+    eta_seconds: Optional[int] = Field(default=None, description="Rolling ETA in seconds based on chunk processing times")
     output_url: Optional[str] = Field(default=None, description="Relative URL to download completed audio")
     source_url: Optional[str] = Field(default=None, description="Relative URL to download uploaded source audio")
 

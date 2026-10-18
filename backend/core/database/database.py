@@ -47,6 +47,22 @@ def init_db() -> None:
     logging.info("Executing init_db table synchronization")
     try:
         Base.metadata.create_all(bind=engine)
+        # Migrate SQLite schema if running SQLite
+        if settings.DATABASE_URL.startswith("sqlite"):
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                existing_cols = [
+                    row[1] for row in conn.execute(text("PRAGMA table_info(jobs)")).fetchall()
+                ]
+                for col_name, col_type in [
+                    ("chunk_done", "INTEGER"),
+                    ("chunk_total", "INTEGER"),
+                    ("eta_seconds", "INTEGER"),
+                    ("completed_at", "DATETIME"),
+                ]:
+                    if col_name not in existing_cols:
+                        conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col_name} {col_type}"))
+                conn.commit()
         logging.info("Database schema initialized successfully")
     except Exception as error:
         logging.error(f"Error during init_db schema initialization: {error}")

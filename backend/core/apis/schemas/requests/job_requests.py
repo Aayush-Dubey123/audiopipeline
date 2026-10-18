@@ -32,8 +32,8 @@ class TTSJobRequest(BaseModel):
     text: str = Field(
         ...,
         min_length=1,
-        max_length=1000,
-        description="Script text to synthesize into spoken audio",
+        max_length=30000,
+        description="Script text to synthesize into spoken audio (up to 30,000 characters supported)",
         examples=["Hello and welcome to AI Voice Studio."],
     )
     language: str = Field(
@@ -57,8 +57,8 @@ class TextCleanupRequest(BaseModel):
     text: str = Field(
         ...,
         min_length=1,
-        max_length=1000,
-        description="Raw script text to normalize and clean",
+        max_length=30000,
+        description="Raw script text to normalize and clean (up to 30,000 characters)",
     )
     language: str = Field(
         default="en",

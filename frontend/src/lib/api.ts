@@ -177,6 +177,16 @@ export const api = {
   },
 
   /**
+   * Resume an interrupted or failed long-form synthesis job.
+   */
+  async resumeJob(jobId: string): Promise<JobCreatedResponse> {
+    const res = await fetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/resume`, {
+      method: 'POST',
+    });
+    return handleResponse<JobCreatedResponse>(res);
+  },
+
+  /**
    * Delete job artifacts and database record.
    */
   async deleteJob(jobId: string): Promise<{ status: string }> {
@@ -193,7 +203,7 @@ export const api = {
     jobId: string,
     onProgress?: (job: JobStatusResponse) => void,
     intervalMs: number = 1000,
-    timeoutMs: number = 120000
+    timeoutMs: number = 1800000
   ): Promise<JobStatusResponse> {
     const startTime = Date.now();
 

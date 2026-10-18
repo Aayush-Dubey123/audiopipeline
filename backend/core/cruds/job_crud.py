@@ -4,14 +4,16 @@ Database CRUD repository for inference job persistence entities.
 Provides transactional job lifecycle updates, retrieval, stale job recovery, and cleanup queries.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from core import logger
 from core.models.job_model import JobModel
+from core.config import get_settings
 
 logging = logger(__name__)
+_settings = get_settings()
 
 
 class JobCRUD:
@@ -80,6 +82,10 @@ class JobCRUD:
         """
         Update execution status and state transitions for a job.
 
+        When status transitions to 'completed' or 'failed', stamps completed_at and
+        sets expires_at to completed_at + JOB_TTL_MINUTES so retention counts from
+        completion rather than creation.
+
         Args:
             db (Session): Active database session.
             job_id (str): Unique identifier of the target job.
@@ -99,8 +105,9 @@ class JobCRUD:
                 logging.warning(f"Cannot update status for nonexistent job '{job_id}'")
                 return None
 
+            now = datetime.now(timezone.utc)
             job.status = status
-            job.updated_at = datetime.now(timezone.utc)
+            job.updated_at = now
             if progress_message is not None:
                 job.progress_message = progress_message
             if error_code is not None:
@@ -109,6 +116,17 @@ class JobCRUD:
                 job.error_message = error_message
             if output_metadata is not None:
                 job.output_metadata = output_metadata
+
+            # Reset error and completion state if requeued / resumed
+            if status == "queued":
+                job.error_code = None
+                job.error_message = None
+                job.completed_at = None
+
+            # Stamp completion time and recalculate TTL from completion
+            if status in ("completed", "failed") and job.completed_at is None:
+                job.completed_at = now
+                job.expires_at = now + timedelta(minutes=_settings.JOB_TTL_MINUTES)
 
             db.commit()
             db.refresh(job)
@@ -205,11 +223,11 @@ class JobCRUD:
     @staticmethod
     def count_active_jobs_for_client(db: Session, client_key: str) -> int:
         """
-        Count active (queued or processing) jobs associated with a client key.
+        Count active (queued or processing) jobs associated with a client (hashed IP).
 
         Args:
             db (Session): Active database session.
-            client_key (str): Hashed client token.
+            client_key (str): Client (hashed IP).
 
         Returns:
             int: Number of currently active jobs.
@@ -225,3 +243,88 @@ class JobCRUD:
             logging.error(f"Error in JobCRUD.count_active_jobs_for_client: {error}")
             return 0
 
+    @staticmethod
+    def update_chunk_progress(
+        db: Session,
+        job_id: str,
+        chunk_done: int,
+        chunk_total: int,
+        eta_seconds: Optional[int] = None,
+    ) -> None:
+        """
+        Persist chunk pipeline progress without changing job status.
+
+        Called after each successful chunk synthesis so the frontend can display
+        real-time progress (chunk x of y, time left).
+
+        Args:
+            db (Session): Active database session.
+            job_id (str): Unique job identifier.
+            chunk_done (int): Number of chunks finished so far.
+            chunk_total (int): Total chunks planned for this job.
+            eta_seconds (Optional[int]): Rolling ETA in seconds; None if not yet calculable.
+
+        Returns:
+            None
+
+        Raises:
+            Exception: If the database write fails.
+        """
+        logging.info(
+            "Executing JobCRUD.update_chunk_progress for job '%s': %d/%d (eta=%s)",
+            job_id, chunk_done, chunk_total, eta_seconds,
+        )
+        try:
+            stmt = (
+                update(JobModel)
+                .where(JobModel.id == job_id)
+                .values(
+                    chunk_done=chunk_done,
+                    chunk_total=chunk_total,
+                    eta_seconds=eta_seconds,
+                    updated_at=datetime.now(timezone.utc),
+                    progress_message=(
+                        f"Synthesising chunk {chunk_done} of {chunk_total}"
+                        + (f" — ETA {eta_seconds}s" if eta_seconds is not None else "")
+                    ),
+                )
+            )
+            db.execute(stmt)
+            db.commit()
+        except Exception as error:
+            db.rollback()
+            logging.error(f"Error in JobCRUD.update_chunk_progress for job '{job_id}': {error}")
+            raise error
+
+    @staticmethod
+    def get_daily_generated_minutes(db: Session, client_key: str) -> float:
+        """
+        Sum the total generated audio minutes for a client (hashed IP) in the last 24 hours.
+
+        Reads from output_metadata.duration_seconds of completed jobs within the
+        rolling 24-hour window to enforce CLIENT_DAILY_MINUTES quota.
+
+        Args:
+            db (Session): Active database session.
+            client_key (str): Client (hashed IP).
+
+        Returns:
+            float: Total generated minutes in the last 24 hours.
+        """
+        logging.info("Executing JobCRUD.get_daily_generated_minutes for client (hashed IP)")
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            query = select(JobModel).where(
+                JobModel.client_key == client_key,
+                JobModel.status == "completed",
+                JobModel.completed_at >= cutoff,
+            )
+            jobs = list(db.execute(query).scalars().all())
+            total_seconds = sum(
+                (j.output_metadata or {}).get("duration_seconds", 0.0)
+                for j in jobs
+            )
+            return total_seconds / 60.0
+        except Exception as error:
+            logging.error(f"Error in JobCRUD.get_daily_generated_minutes: {error}")
+            return 0.0

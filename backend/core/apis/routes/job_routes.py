@@ -256,6 +256,50 @@ def get_job(
         )
 
 
+@router.post(
+    "/jobs/{job_id}/resume",
+    response_model=JobCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Resume or Retry Inference Job",
+    description="Resumes a failed, interrupted, or stalled long-form inference job, reusing finished chunks.",
+)
+def resume_job(
+    job_id: str,
+    http_request: Request,
+    db: Session = Depends(get_db),
+) -> JobCreatedResponse:
+    """
+    Handle POST /v1/jobs/{job_id}/resume endpoint requests.
+
+    Args:
+        job_id (str): Unique URL-safe job token identifier.
+        http_request (Request): Inbound HTTP request.
+        db (Session): Database session dependency.
+
+    Returns:
+        JobCreatedResponse: Queued job confirmation payload.
+
+    Raises:
+        HTTPException 400: If job is already completed or cannot be resumed.
+        HTTPException 404: If job does not exist.
+        HTTPException 429: If queue is full or client quota is exceeded.
+        HTTPException 500: If unexpected internal error occurs.
+    """
+    logging.info(f"Calling POST /v1/jobs/{job_id}/resume endpoint")
+    try:
+        client_key = get_hashed_client_key(http_request)
+        return JobController.resume_job(db=db, client_key=client_key, job_id=job_id)
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/jobs/{job_id}/resume endpoint: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/jobs/{job_id}/resume endpoint: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+
+
 @router.get(
     "/audio/{job_id}/output",
     response_class=FileResponse,

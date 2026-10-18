@@ -167,7 +167,11 @@ class JobWorker:
             if pipeline_fn is None:
                 raise RuntimeError("No inference pipeline handler configured for this job.")
 
-            timeout_seconds = settings.JOB_TIMEOUT_SECONDS
+            timeout_seconds = (
+                settings.JOB_MAX_SECONDS
+                if job.kind in ("tts", "tts_custom")
+                else settings.JOB_TIMEOUT_SECONDS
+            )
             with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(
                     pipeline_fn,
@@ -187,7 +191,7 @@ class JobWorker:
                         status="failed",
                         error_code="TIMEOUT",
                         error_message=f"Inference job exceeded execution limit of {timeout_seconds} seconds.",
-                        progress_message="Job timed out during execution.",
+                        progress_message="Job timed out during execution. Finished chunks are preserved for resumption.",
                     )
                     return
 
@@ -208,10 +212,193 @@ class JobWorker:
                 status="failed",
                 error_code="INFERENCE_FAILED",
                 error_message=str(error),
-                progress_message="Inference failed.",
+                progress_message="Inference failed. Finished chunks are preserved for resumption.",
             )
         finally:
             db.close()
+
+
+def _run_long_form_tts(
+    job_id: str,
+    text: str,
+    ref_path: Path,
+    out_wav: Path,
+    speed: float,
+    language: str,
+    job_dir: Path,
+) -> Dict[str, Any]:
+    """
+    Execute chunked long-form text-to-speech synthesis with pause stitching and progress updates.
+
+    Args:
+        job_id (str): Unique job identifier for progress tracking.
+        text (str): Input script text (up to 30,000 characters).
+        ref_path (Path): Path to reference speaker audio file.
+        out_wav (Path): Target destination for concatenated output WAV.
+        speed (float): Playback speed multiplier.
+        language (str): Target language ('en', 'hi', 'mr').
+        job_dir (Path): Working directory for chunk temporary files.
+
+    Returns:
+        Dict[str, Any]: Generated audio metadata.
+
+    Raises:
+        RuntimeError: If disk space is insufficient, reference audio is missing, or generation fails.
+        TimeoutError: If execution exceeds chunk or job timeouts.
+    """
+    from core.services.pipelines.openvoice_service import OpenVoiceService, split_text_with_boundaries
+    from core.services.audio.audio_service import AudioService
+    from core.database.database import SessionLocal
+    import shutil
+
+    # 1. Enforce disk space safety before creating chunks
+    AudioService.check_free_disk_gb(settings.tmp_path, required_gb=1.0)
+
+    # 2. Split text into chunks respecting sentence and paragraph boundaries
+    chunks, para_boundaries = split_text_with_boundaries(text, max_chars=settings.CHUNK_MAX_CHARS)
+    if not chunks:
+        raise RuntimeError("No valid text provided for synthesis.")
+
+    chunk_total = len(chunks)
+    chunks_dir = job_dir / "chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clean up any leftover incomplete .part files from prior interrupted attempts
+    for stale_part in chunks_dir.glob("*.part"):
+        stale_part.unlink(missing_ok=True)
+
+    # Check for already completed chunks
+    existing_finished = [
+        chunks_dir / f"chunk_{i:04d}.wav"
+        for i in range(chunk_total)
+        if (chunks_dir / f"chunk_{i:04d}.wav").exists() and (chunks_dir / f"chunk_{i:04d}.wav").stat().st_size > 44
+    ]
+    is_resumed = len(existing_finished) > 0
+    force_recompute_se = is_resumed  # Recompute speaker embedding on resume
+
+    # 3. Publish initial progress
+    db = SessionLocal()
+    try:
+        JobCRUD.update_chunk_progress(
+            db,
+            job_id=job_id,
+            chunk_done=len(existing_finished),
+            chunk_total=chunk_total,
+            eta_seconds=None,
+        )
+    finally:
+        db.close()
+
+    service = OpenVoiceService()
+    chunk_paths = []
+    job_start_time = time.perf_counter()
+    sample_rate = 22050
+
+    try:
+        for idx, chunk_text in enumerate(chunks):
+            # Enforce overall job timeout
+            if (time.perf_counter() - job_start_time) > settings.JOB_MAX_SECONDS:
+                raise TimeoutError(f"Job exceeded overall timeout limit of {settings.JOB_MAX_SECONDS} seconds.")
+
+            chunk_out = chunks_dir / f"chunk_{idx:04d}.wav"
+            chunk_part = chunks_dir / f"chunk_{idx:04d}.wav.part"
+
+            # Skip already finished chunk
+            if chunk_out.exists() and chunk_out.stat().st_size > 44:
+                logging.info(
+                    "Skipping already synthesized chunk %d/%d (resuming)",
+                    idx + 1,
+                    chunk_total,
+                )
+                chunk_paths.append(chunk_out)
+                chunk_done = idx + 1
+                sample_rate = AudioService.probe_audio(chunk_out).sample_rate
+                continue
+
+            chunk_t0 = time.perf_counter()
+            chunk_lang = "hi" if any("\u0900" <= c <= "\u097F" for c in chunk_text) else language
+
+            # Synthesize chunk to .part file
+            res = service.generate(
+                text=chunk_text,
+                reference_audio_path=str(ref_path),
+                output_path=str(chunk_part),
+                speed=speed,
+                language=chunk_lang,
+                force_recompute_se=force_recompute_se,
+            )
+            force_recompute_se = False
+
+            # Atomically rename .part to final chunk .wav
+            if chunk_part.exists():
+                chunk_part.replace(chunk_out)
+
+            chunk_duration = time.perf_counter() - chunk_t0
+            if chunk_duration > settings.CHUNK_TIMEOUT_SECONDS:
+                logging.warning(
+                    "Chunk %d/%d took %.1fs (timeout=%ds)",
+                    idx + 1,
+                    chunk_total,
+                    chunk_duration,
+                    settings.CHUNK_TIMEOUT_SECONDS,
+                )
+
+            chunk_paths.append(chunk_out)
+            sample_rate = res.sample_rate
+
+            # Calculate rolling ETA
+            chunk_done = idx + 1
+            elapsed = time.perf_counter() - job_start_time
+            avg_per_chunk = elapsed / max(chunk_done - len(existing_finished), 1)
+            remaining = chunk_total - chunk_done
+            eta_seconds = int(avg_per_chunk * remaining) if remaining > 0 else 0
+
+            db = SessionLocal()
+            try:
+                JobCRUD.update_chunk_progress(
+                    db,
+                    job_id=job_id,
+                    chunk_done=chunk_done,
+                    chunk_total=chunk_total,
+                    eta_seconds=eta_seconds,
+                )
+            finally:
+                db.close()
+
+        # 4. Join chunks or copy single chunk
+        if chunk_total == 1:
+            shutil.copyfile(str(chunk_paths[0]), str(out_wav))
+        else:
+            AudioService.join_chunks_ffmpeg(
+                chunk_paths=chunk_paths,
+                output_path=out_wav,
+                pause_sentence_ms=settings.CHUNK_PAUSE_SENTENCE_MS,
+                pause_paragraph_ms=settings.CHUNK_PAUSE_PARAGRAPH_MS,
+                paragraph_boundary_indices=para_boundaries,
+                sample_rate=sample_rate,
+            )
+
+        # 5. Add synthetic AI attribution metadata
+        AudioService.add_ai_label_metadata(out_wav)
+
+        # 6. Purge intermediate chunks ONLY after successful join
+        shutil.rmtree(chunks_dir, ignore_errors=True)
+
+        final_meta = AudioService.probe_audio(out_wav)
+        return {
+            "format": "wav",
+            "duration_seconds": final_meta.duration_seconds,
+            "sample_rate": final_meta.sample_rate,
+            "language": language,
+            "chunk_total": chunk_total,
+            "ai_generated": True,
+        }
+    except Exception as exc:
+        # Keep finished chunks, only purge partial incomplete .part files
+        if chunks_dir.exists():
+            for p in chunks_dir.glob("*.part"):
+                p.unlink(missing_ok=True)
+        raise exc
 
 
 def production_inference_pipeline(
@@ -241,8 +428,6 @@ def production_inference_pipeline(
     out_wav = job_dir / "output.wav"
 
     if kind == "tts":
-        from core.services.pipelines.openvoice_service import OpenVoiceService
-        from core.services.audio.audio_service import AudioService
         from core.cruds.voice_crud import VoiceCRUD
         from core.database.database import SessionLocal
 
@@ -262,28 +447,17 @@ def production_inference_pipeline(
         finally:
             db.close()
 
-        service = OpenVoiceService()
-        result = service.generate(
+        return _run_long_form_tts(
+            job_id=job_id,
             text=text,
-            reference_audio_path=str(ref_path),
-            output_path=str(out_wav),
+            ref_path=ref_path,
+            out_wav=out_wav,
             speed=speed,
             language=language,
+            job_dir=job_dir,
         )
-        AudioService.add_ai_label_metadata(out_wav)
-
-        return {
-            "format": "wav",
-            "duration_seconds": result.duration_seconds,
-            "sample_rate": result.sample_rate,
-            "language": language,
-            "ai_generated": True,
-        }
 
     elif kind == "tts_custom":
-        from core.services.pipelines.openvoice_service import OpenVoiceService
-        from core.services.audio.audio_service import AudioService
-
         text = payload.get("text", "")
         language = payload.get("language", "en")
         speed = float(payload.get("speed", 1.0))
@@ -292,23 +466,15 @@ def production_inference_pipeline(
         if not ref_path.exists():
             raise RuntimeError("Reference audio file missing in custom TTS job directory.")
 
-        service = OpenVoiceService()
-        result = service.generate(
+        return _run_long_form_tts(
+            job_id=job_id,
             text=text,
-            reference_audio_path=str(ref_path),
-            output_path=str(out_wav),
+            ref_path=ref_path,
+            out_wav=out_wav,
             speed=speed,
             language=language,
+            job_dir=job_dir,
         )
-        AudioService.add_ai_label_metadata(out_wav)
-
-        return {
-            "format": "wav",
-            "duration_seconds": result.duration_seconds,
-            "sample_rate": result.sample_rate,
-            "language": language,
-            "ai_generated": True,
-        }
 
     elif kind == "vc":
         from core.services.pipelines.rvc_service import RVCService

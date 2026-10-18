@@ -3,16 +3,18 @@ OpenVoice V2 and MeloTTS tone color conversion inference pipeline.
 
 Provides structured text-to-speech synthesis and tone color transfer using
 MeloTTS English base speaker models and OpenVoice V2 tone conversion neural networks.
+Also exposes a sentence-level text splitter used by the long-form chunk pipeline.
 """
 
 import argparse
 import os
+import re
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any
 
 import soundfile as sf
 import torch
@@ -60,64 +62,209 @@ class GenerationResult:
     language: str = "en"
 
 
-HINGLISH_TO_DEVANAGARI_MAP = [
-    ("namaste", "नमस्ते"),
-    ("namaskar", "नमस्कार"),
-    ("dhanyawad", "धन्यवाद"),
-    ("dhanyavad", "धन्यवाद"),
-    ("shukriya", "शुक्रिया"),
-    ("kaise", "कैसे"),
-    ("kaisa", "कैसा"),
-    ("kaisi", "कैसी"),
-    ("hain", "हैं"),
-    ("hai", "है"),
-    ("hoon", "हूँ"),
-    ("aap", "आप"),
-    ("tum", "तुम"),
-    ("main", "मैं"),
-    ("hum", "हम"),
-    ("kya", "क्या"),
-    ("kyun", "क्यों"),
-    ("haan", "हाँ"),
-    ("nahi", "नहीं"),
-    ("nahin", "नहीं"),
-    ("theek", "ठीक"),
-    ("achha", "अच्छा"),
-    ("acha", "अच्छा"),
-    ("bahut", "बहुत"),
-    ("shubh", "शुभ"),
-    ("prabhat", "प्रभात"),
-    ("alvida", "अलविदा"),
-    ("dost", "दोस्त"),
-    ("swagat", "स्वागत"),
-    ("bharat", "भारत"),
-    ("india", "इंडिया"),
-]
+# ---------------------------------------------------------------------------
+# Text splitter — used by both the CLI harness and the long-form chunk pipeline
+# ---------------------------------------------------------------------------
+
+# Abbreviations that must NOT be treated as sentence-ending periods.
+_ABBREVIATIONS = {
+    "dr", "mr", "mrs", "ms", "prof", "sr", "jr", "vs", "etc",
+    "ie", "eg", "approx", "dept", "est", "govt", "inc", "ltd", "no",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    "st", "ave", "blvd",
+}
+
+# Sentence-boundary pattern:
+#   [.!?।॥]     — ASCII terminators plus Devanagari danda / double-danda
+#   (\s|$)       — followed by whitespace or end-of-string
+_SENT_END = re.compile(r"[.!?।॥]+(?=\s|$)")
+
+# Decimal / ordinal protection: digits around a period (e.g. 1.5, 3rd, Rs.500)
+_DECIMAL_GUARD = re.compile(r"(\d+)\.(?=\d)")
+# Abbreviation guard: word followed by period then whitespace+capital or end
+_ABBREV_GUARD = re.compile(r"\b([A-Za-z]{1,6})\.(?=\s)")
 
 
-def transliterate_hinglish_to_devanagari(text: str) -> str:
+def _is_abbreviation(word: str) -> bool:
     """
-    Transliterate common romanized Hinglish/Marathi words to native Devanagari script.
+    Return True if the word is a known abbreviation that should not end a sentence.
 
     Args:
-        text (str): Input text possibly in romanized script.
+        word (str): Candidate word (stripped of trailing period).
 
     Returns:
-        str: Transliterated Devanagari script or original text if already Devanagari.
+        bool: True if the word is in the protected abbreviation set.
     """
-    import re
-    if re.search(r"[\u0900-\u097f]", text):
-        return text
+    return word.lower().rstrip(".") in _ABBREVIATIONS
 
-    word_map = dict(HINGLISH_TO_DEVANAGARI_MAP)
-    words = re.findall(r"\b\w+\b|[^\w\s]", text.lower())
-    transliterated = []
-    for w in words:
-        if w in word_map:
-            transliterated.append(word_map[w])
-        else:
-            transliterated.append(w)
-    return " ".join(transliterated) if transliterated else text
+
+def split_text_with_boundaries(text: str, max_chars: int = 1000) -> Tuple[List[str], set]:
+    """
+    Split a long text into chunks of at most max_chars characters and record paragraph starts.
+
+    Splitting rules (in priority order):
+      1. Split at sentence boundaries (.  !  ?  ।  ॥) followed by whitespace,
+         but NOT after known abbreviations (Dr., Mr., etc.) or decimal numbers.
+      2. If a sentence segment still exceeds max_chars, fall back to the last
+         comma or semicolon before the limit.
+      3. If no comma/semicolon is found, fall back to the last whitespace.
+      4. Hard-cut at max_chars only if no whitespace exists (should not happen
+         for normal prose).
+
+    Each chunk is stripped of leading/trailing whitespace. Empty chunks are
+    discarded. Paragraphs (double-newline) are always split points, and the index
+    of chunks starting a new paragraph is returned in a set.
+
+    Args:
+        text (str): Input script text (any language, Devanagari or Latin).
+        max_chars (int): Maximum characters per chunk (default 1000).
+
+    Returns:
+        Tuple[List[str], set]: Ordered list of text chunks and set of paragraph-start indices.
+    """
+    if not text or not text.strip():
+        return [], set()
+
+    chunks: List[str] = []
+    paragraph_start_indices = set()
+    paragraphs = re.split(r"\n{2,}", text)
+
+    def flush(buf: str) -> List[str]:
+        """Break a buffer that still exceeds max_chars at best sub-word boundary."""
+        results: List[str] = []
+        while len(buf) > max_chars:
+            cut = max_chars
+            for pat in (r"[,;]\s", r"\s"):
+                m = None
+                for match in re.finditer(pat, buf[:max_chars]):
+                    m = match
+                if m:
+                    cut = m.end()
+                    break
+            results.append(buf[:cut].strip())
+            buf = buf[cut:].lstrip()
+        if buf.strip():
+            results.append(buf.strip())
+        return results
+
+    for para_idx, para in enumerate(paragraphs):
+        para = para.strip()
+        if not para:
+            continue
+
+        start_chunk_idx = len(chunks)
+        if para_idx > 0 and start_chunk_idx > 0:
+            paragraph_start_indices.add(start_chunk_idx)
+
+        positions: List[int] = []
+        for m in _SENT_END.finditer(para):
+            end = m.end()
+            before = para[:m.start()].rstrip()
+            last_word = re.split(r"\s", before)[-1] if before else ""
+            after_char = para[end:end + 1] if end < len(para) else ""
+            if after_char.isdigit():
+                continue
+            if _is_abbreviation(last_word):
+                continue
+            positions.append(end)
+
+        segments: List[str] = []
+        prev = 0
+        for pos in positions:
+            seg = para[prev:pos].strip()
+            if seg:
+                segments.append(seg)
+            prev = pos
+        tail = para[prev:].strip()
+        if tail:
+            segments.append(tail)
+
+        if not segments:
+            segments = [para]
+
+        current = ""
+        for seg in segments:
+            if len(seg) > max_chars:
+                if current.strip():
+                    chunks.extend(flush(current.strip()))
+                    current = ""
+                chunks.extend(flush(seg))
+                continue
+
+            if current and len(current) + 1 + len(seg) > max_chars:
+                chunks.extend(flush(current.strip()))
+                current = seg
+            else:
+                current = (current + " " + seg).lstrip() if current else seg
+
+        if current.strip():
+            chunks.extend(flush(current.strip()))
+
+    final_chunks = [c for c in chunks if c.strip()]
+    return final_chunks, paragraph_start_indices
+
+
+def split_text_into_chunks(text: str, max_chars: int = 1000) -> List[str]:
+    """
+    Split a long text into chunks of at most max_chars characters.
+
+    Args:
+        text (str): Input script text (any language, Devanagari or Latin).
+        max_chars (int): Maximum characters per chunk (default 1000).
+
+    Returns:
+        List[str]: Ordered list of non-empty text chunks.
+    """
+    chunks, _ = split_text_with_boundaries(text, max_chars)
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Hindi / Marathi input preparation
+# ---------------------------------------------------------------------------
+
+
+def _has_devanagari(text: str) -> bool:
+    """
+    Return True if the text contains at least one Devanagari Unicode character.
+
+    Args:
+        text (str): Input text to check.
+
+    Returns:
+        bool: True when Devanagari characters are present.
+    """
+    return bool(re.search(r"[\u0900-\u097F]", text))
+
+
+def prepare_hindi_text(text: str) -> str:
+    """
+    Prepare Hindi/Marathi text for MMS-TTS input.
+
+    If the text is already in Devanagari script it is returned as-is.
+    Romanized / Hinglish text is NOT accepted for the Hindi pipeline — the
+    MMS-TTS VITS phoneme model maps Devanagari characters to phonemes; any
+    Latin characters that survive tokenisation are silently skipped, which
+    causes the 83-char/s rate seen in benchmarks.  Callers must supply
+    native Devanagari for the 'hi'/'mr' language path.
+
+    Args:
+        text (str): Raw input text.
+
+    Returns:
+        str: Validated and stripped text ready for MMS-TTS tokenisation.
+
+    Raises:
+        ValueError: If the text contains no Devanagari characters.
+    """
+    cleaned = text.strip()
+    if not _has_devanagari(cleaned):
+        raise ValueError(
+            "Hindi/Marathi TTS requires native Devanagari script input. "
+            "Romanized (Hinglish) text will be silently dropped by the MMS-TTS phoneme model. "
+            "Please convert your text to Devanagari before submitting."
+        )
+    return cleaned
 
 
 class OpenVoiceService:
@@ -382,6 +529,7 @@ class OpenVoiceService:
         self,
         reference_wav_path: str,
         cache_on_disk: bool = True,
+        force_recompute: bool = False,
     ) -> torch.Tensor:
         """
         Extract or retrieve cached speaker embedding (SE) from reference audio.
@@ -389,6 +537,7 @@ class OpenVoiceService:
         Args:
             reference_wav_path (str): Filepath to the clean 24kHz reference WAV.
             cache_on_disk (bool): Whether to persist extracted tensor to disk.
+            force_recompute (bool): If True, ignore caches and recompute embedding. Defaults to False.
 
         Returns:
             torch.Tensor: Target speaker embedding tensor.
@@ -406,23 +555,25 @@ class OpenVoiceService:
         current_mtime = ref_path.stat().st_mtime
         cache_key = str(ref_path)
 
-        if cache_key in self._target_se_cache:
-            cached_mtime, tensor = self._target_se_cache[cache_key]
-            if cached_mtime == current_mtime:
-                log.debug("Using in-memory target speaker embedding for: %s", ref_path.name)
-                return tensor
-
         disk_cache_path = ref_path.with_suffix(".se.pth")
-        if cache_on_disk and disk_cache_path.exists():
-            if disk_cache_path.stat().st_mtime >= current_mtime:
-                log.info("Loading cached target speaker embedding from: %s", disk_cache_path.name)
-                tensor = torch.load(str(disk_cache_path), map_location=self.device, weights_only=True)
-                self._target_se_cache[cache_key] = (current_mtime, tensor)
-                return tensor
+
+        if not force_recompute:
+            if cache_key in self._target_se_cache:
+                cached_mtime, tensor = self._target_se_cache[cache_key]
+                if cached_mtime == current_mtime:
+                    log.debug("Using in-memory target speaker embedding for: %s", ref_path.name)
+                    return tensor
+
+            if cache_on_disk and disk_cache_path.exists():
+                if disk_cache_path.stat().st_mtime >= current_mtime:
+                    log.info("Loading cached target speaker embedding from: %s", disk_cache_path.name)
+                    tensor = torch.load(str(disk_cache_path), map_location=self.device, weights_only=True)
+                    self._target_se_cache[cache_key] = (current_mtime, tensor)
+                    return tensor
 
         converter = self._load_converter()
         try:
-            log.info("Extracting target speaker embedding from: %s", ref_path.name)
+            log.info("Extracting target speaker embedding from: %s (force_recompute=%s)", ref_path.name, force_recompute)
             target_se = converter.extract_se(
                 str(ref_path),
                 se_save_path=str(disk_cache_path) if cache_on_disk else None,
@@ -442,6 +593,7 @@ class OpenVoiceService:
         speed: float = 1.0,
         tau: float = 0.3,
         language: str = "en",
+        force_recompute_se: bool = False,
     ) -> GenerationResult:
         """
         Generate synthesized speech transferred to the tone of reference audio.
@@ -456,6 +608,7 @@ class OpenVoiceService:
             speed (float): Playback rate multiplier. Defaults to 1.0.
             tau (float): OpenVoice conversion temperature. Defaults to 0.3.
             language (str): Target language ISO code ('en', 'hi', or 'mr'). Defaults to 'en'.
+            force_recompute_se (bool): If True, recompute target speaker embedding from audio. Defaults to False.
 
         Returns:
             GenerationResult: Comprehensive metrics and output file metadata.
@@ -474,6 +627,10 @@ class OpenVoiceService:
             raise OpenVoiceInferenceError(
                 f"Unsupported language '{language}'. Supported languages: English ('en'), Hindi ('hi'), Marathi ('mr')."
             )
+
+        # Auto-route chunks with Devanagari script to Hindi MMS-TTS engine
+        if lang == "en" and any("\u0900" <= c <= "\u097F" for c in clean_text):
+            lang = "hi"
 
         ref_file = Path(reference_audio_path).resolve()
         if not ref_file.exists():
@@ -512,18 +669,45 @@ class OpenVoiceService:
             tts_start = time.time()
 
             if lang in ("hi", "mr"):
-                # 1. Base TTS Synthesis with Meta MMS-TTS (Hindi / Marathi)
+                # 1. Validate and prepare Devanagari text
+                try:
+                    effective_text = prepare_hindi_text(clean_text)
+                except ValueError as ve:
+                    raise OpenVoiceInferenceError(str(ve)) from ve
+
+                log.info(
+                    "Hindi/Marathi input: raw_chars=%d, devanagari_chars=%d",
+                    len(clean_text),
+                    len(effective_text),
+                )
+
+                # 2. Base TTS Synthesis with Meta MMS-TTS (Hindi / Marathi)
                 mms_tok, mms_model = self._load_mms_tts(lang)
-                effective_text = transliterate_hinglish_to_devanagari(clean_text)
                 inputs = mms_tok(effective_text, return_tensors="pt")
-                if inputs["input_ids"].shape[-1] == 0:
+                token_count = inputs["input_ids"].shape[-1]
+                log.info(
+                    "MMS-TTS tokenised input: %d tokens for %d chars (%.1f chars/token)",
+                    token_count,
+                    len(effective_text),
+                    len(effective_text) / max(token_count, 1),
+                )
+                if token_count == 0:
                     raise OpenVoiceInferenceError(
-                        f"Input text does not contain valid {lang.upper()} Devanagari characters or recognizable romanized words."
+                        f"MMS-TTS tokeniser produced 0 tokens for {lang.upper()} input. "
+                        "Ensure the text contains valid Devanagari script."
                     )
                 inputs = inputs.to(self.device)
                 with torch.no_grad():
                     mms_out = mms_model(**inputs)
                 raw_wav = mms_out.waveform.squeeze().cpu().numpy()
+                audio_duration_produced = len(raw_wav) / 16000
+                chars_per_second = len(effective_text) / max(audio_duration_produced, 0.001)
+                log.info(
+                    "MMS-TTS produced %.2fs of audio for %d chars (%.1f chars/s) — expected 10-15 chars/s",
+                    audio_duration_produced,
+                    len(effective_text),
+                    chars_per_second,
+                )
                 sf.write(temp_src_file, raw_wav, 16000)
                 base_tts_duration = time.time() - tts_start
                 log.info("MMS-TTS base audio (%s) generated in %.2fs", lang, base_tts_duration)
@@ -553,18 +737,32 @@ class OpenVoiceService:
                 source_se = self.get_source_speaker_embedding("en-default.pth")
 
             # 2. Extract / Retrieve Speaker Embeddings
-            target_se = self.extract_target_speaker_embedding(str(ref_file))
+            target_se = self.extract_target_speaker_embedding(
+                str(ref_file),
+                force_recompute=force_recompute_se,
+            )
 
             # 3. Tone Color Conversion
             conv_start = time.time()
+            conv_target_path = str(out_file)
+            is_part_file = conv_target_path.endswith(".part")
+            if is_part_file:
+                # Soundfile cannot infer audio format from .part; synthesize to temporary .wav then move
+                conv_target_path = conv_target_path[:-5] if conv_target_path.endswith(".part") else f"{conv_target_path}.wav"
+
             converter.convert(
                 audio_src_path=temp_src_file,
                 src_se=source_se,
                 tgt_se=target_se,
-                output_path=str(out_file),
+                output_path=conv_target_path,
                 tau=tau,
                 message="@MyShell",
             )
+            if is_part_file and os.path.exists(conv_target_path):
+                if os.path.exists(str(out_file)):
+                    os.remove(str(out_file))
+                os.replace(conv_target_path, str(out_file))
+
             tone_conv_duration = time.time() - conv_start
             log.info("Tone conversion completed in %.2fs", tone_conv_duration)
 
@@ -629,7 +827,14 @@ class OpenVoiceService:
 
 def main() -> None:
     """
-    CLI execution entry point for standalone verification and benchmarking.
+    CLI execution entry point for standalone verification, benchmarking, and Hindi diagnostics.
+
+    Modes
+    -----
+    --mode generate   : Single TTS generation pass (default).
+    --mode hindi_diag : Hindi diagnostic — tests native Devanagari and validates chars/s.
+    --mode splitter   : Splitter self-check against edge-case texts.
+    --mode benchmark  : EN-1k, EN-5k, HI-native, EN-1k repeat benchmarks + 30-min estimate.
     """
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -639,6 +844,13 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description="AI Voice Studio: OpenVoice V2 + Multilingual TTS CLI Harness"
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="generate",
+        choices=["generate", "hindi_diag", "splitter", "benchmark"],
+        help="Execution mode",
     )
     parser.add_argument(
         "--text",
@@ -685,6 +897,58 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # ------------------------------------------------------------------ #
+    # MODE: splitter — no GPU needed
+    # ------------------------------------------------------------------ #
+    if args.mode == "splitter":
+        print("=" * 60)
+        print("  Splitter self-check")
+        print("=" * 60)
+
+        cases = [
+            # (description, text, max_chars, expected_chunks_ge)
+            ("Short English",
+             "Hello world. This is a test.", 200, 1),
+            ("Abbreviation protection",
+             "Dr. Smith works at approx. 9 a.m. every day. He is great.", 200, 1),
+            ("Decimal protection",
+             "The price is Rs. 1.5 per unit. Buy 10.5 kg.", 200, 1),
+            ("Devanagari danda split",
+             "नमस्ते। आज मौसम अच्छा है। कल बारिश होगी।", 50, 2),
+            ("Long unbroken text falls back to whitespace",
+             "word " * 300, 100, 5),
+            ("Paragraph boundary",
+             "Para one sentence.\n\nPara two sentence.", 200, 2),
+            ("English then Devanagari",
+             "Hello! यह एक परीक्षण है। Great.", 100, 2),
+        ]
+
+        all_pass = True
+        for desc, text, max_c, min_chunks in cases:
+            chunks = split_text_into_chunks(text, max_chars=max_c)
+            ok = (
+                len(chunks) >= min_chunks
+                and all(len(c) <= max_c for c in chunks)
+                and all(not c[0].isspace() and not c[-1].isspace() for c in chunks)
+            )
+            status = "PASS" if ok else "FAIL"
+            if not ok:
+                all_pass = False
+            print("  [{status}] {desc}: {n} chunks, max_len={ml}".format(
+                status=status, desc=desc, n=len(chunks),
+                ml=max(len(c) for c in chunks) if chunks else 0))
+            for i, c in enumerate(chunks):
+                preview = c[:60].replace("\n", " ")
+                print("         chunk[{}]: {} chars | {!r}...".format(i, len(c), preview))
+
+        print("=" * 60)
+        print("  Splitter: " + ("ALL PASS" if all_pass else "SOME FAILURES"))
+        print("=" * 60)
+        sys.exit(0 if all_pass else 1)
+
+    # ------------------------------------------------------------------ #
+    # Remaining modes need a service + reference wav
+    # ------------------------------------------------------------------ #
     service = OpenVoiceService(device=args.device)
 
     ref_path = Path(args.reference)
@@ -695,16 +959,150 @@ def main() -> None:
     if not out_path.is_absolute():
         out_path = service.backend_dir / out_path
 
+    # ------------------------------------------------------------------ #
+    # MODE: hindi_diag
+    # ------------------------------------------------------------------ #
+    if args.mode == "hindi_diag":
+        print("=" * 60)
+        print("  Hindi Diagnostic")
+        print("=" * 60)
+
+        native_hi = (
+            "नमस्ते! आज हम आर्टिफिशियल इंटेलिजेंस के क्षेत्र में एक नई तकनीक के "
+            "बारे में बात करेंगे जिसे टेक्स्ट-टू-स्पीच कहा जाता है। "
+            "यह तकनीक लिखे हुए शब्दों को प्राकृतिक आवाज़ में बदलती है।"
+        )
+
+        romanized_hi = (
+            "namaste! aaj hum artificial intelligence ke kshetra mein "
+            "ek nayi takneek ke baare mein baat karenge."
+        )
+
+        print("  Case 1: Native Devanagari ({} chars)".format(len(native_hi)))
+        hi_out = service.backend_dir / "storage" / "benchmark" / "diag_hi_native.wav"
+        hi_out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            t0 = time.perf_counter()
+            r = service.generate(
+                text=native_hi,
+                reference_audio_path=str(ref_path),
+                output_path=str(hi_out),
+                language="hi",
+            )
+            elapsed = time.perf_counter() - t0
+            cps = len(native_hi) / max(r.duration_seconds, 0.001)
+            print("    Audio: {:.2f}s | Wall: {:.2f}s | chars/s: {:.1f} (target 10-15)".format(
+                r.duration_seconds, elapsed, cps))
+            print("    PASS" if 8 <= cps <= 20 else "    WARNING: chars/s out of expected range")
+        except Exception as exc:
+            print("    FAIL: {}".format(exc))
+
+        print("  Case 2: Romanized text (should raise ValueError)")
+        try:
+            prepare_hindi_text(romanized_hi)
+            print("    FAIL: no error raised for romanized text")
+        except ValueError as ve:
+            print("    PASS: raised ValueError as expected")
+            print("    Message: {}".format(str(ve)[:80]))
+
+        print("=" * 60)
+        sys.exit(0)
+
+    # ------------------------------------------------------------------ #
+    # MODE: benchmark
+    # ------------------------------------------------------------------ #
+    if args.mode == "benchmark":
+        import json
+        out_dir = service.backend_dir / "storage" / "benchmark"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        en_1k = (
+            "Welcome to the AI Voice Studio benchmark session. Today we are testing the "
+            "long-form text-to-speech pipeline that will power client scripts of up to "
+            "thirty minutes in length. The system uses MeloTTS as the base synthesis "
+            "engine and the OpenVoice V2 tone color converter to clone the target speaker "
+            "from a short reference clip. Our goal for this benchmark is to measure wall "
+            "clock time per thousand characters, the real-time factor relative to the "
+            "generated audio length, and the peak VRAM footprint on the RTX 3050 GPU. "
+            "We will also observe whether speed degrades across repeated calls in the same "
+            "warm process. Let us begin the first pass now."
+        )
+        en_5k = (en_1k + "\n\n") * 5
+        hi_native = (
+            "नमस्ते! आज हम आर्टिफिशियल इंटेलिजेंस के क्षेत्र में एक नई और रोमांचक "
+            "तकनीक के बारे में बात करेंगे जिसे टेक्स्ट-टू-स्पीच कहा जाता है। "
+            "यह तकनीक लिखे हुए शब्दों को प्राकृतिक आवाज़ में बदलती है। "
+            "हमारा उद्देश्य यह जानना है कि एक छोटी संदर्भ क्लिप से आवाज़ की नकल "
+            "कितनी अच्छी तरह की जा सकती है।"
+        )
+
+        runs = [
+            ("EN-1k-cold", en_1k, "en", "bench2_en1k_cold.wav"),
+            ("EN-5k-warm", en_5k, "en", "bench2_en5k.wav"),
+            ("HI-native", hi_native, "hi", "bench2_hi_native.wav"),
+            ("EN-1k-repeat1", en_1k, "en", "bench2_en1k_r1.wav"),
+            ("EN-1k-repeat2", en_1k, "en", "bench2_en1k_r2.wav"),
+        ]
+
+        results = []
+        for label, text, lang, fname in runs:
+            print("Running {} ({} chars)...".format(label, len(text)))
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            t0 = time.perf_counter()
+            try:
+                r = service.generate(
+                    text=text,
+                    reference_audio_path=str(ref_path),
+                    output_path=str(out_dir / fname),
+                    language=lang,
+                )
+            except Exception as exc:
+                print("  FAILED: {}".format(exc))
+                continue
+            elapsed = time.perf_counter() - t0
+            alloc = torch.cuda.max_memory_allocated() / 1024**2 if torch.cuda.is_available() else 0
+            res_mb = torch.cuda.max_memory_reserved() / 1024**2 if torch.cuda.is_available() else 0
+            cps = len(text) / max(r.duration_seconds, 0.001)
+            row = {
+                "label": label, "chars": len(text),
+                "audio_s": round(r.duration_seconds, 2),
+                "wall_s": round(elapsed, 2),
+                "s_per_1k": round(elapsed / len(text) * 1000, 2),
+                "rtf": round(elapsed / r.duration_seconds, 3),
+                "vram_alloc_mb": round(alloc, 1),
+                "vram_res_mb": round(res_mb, 1),
+                "chars_per_s": round(cps, 1),
+            }
+            results.append(row)
+            print("  audio={audio_s}s wall={wall_s}s s/1k={s_per_1k} RTF={rtf} VRAM={vram_alloc_mb}MB chars/s={chars_per_s}".format(**row))
+
+        target_chars = int(30 * 150 * 5.5)
+        warm_rate = next((r["s_per_1k"] for r in results if "repeat" in r["label"]), None)
+        if warm_rate:
+            est_s = target_chars / 1000 * warm_rate
+            print("30-min estimate: ~{} chars -> {:.0f}s ({:.1f} min) at {:.2f}s/1k".format(
+                target_chars, est_s, est_s / 60, warm_rate))
+
+        rp = out_dir / "benchmark_results_v2.json"
+        with open(rp, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+        print("Results saved to {}".format(rp))
+        sys.exit(0)
+
+    # ------------------------------------------------------------------ #
+    # MODE: generate (default)
+    # ------------------------------------------------------------------ #
     print("=" * 60)
     print("AI Voice Studio - OpenVoice V2 Multilingual Inference Test")
     print("=" * 60)
-    print(f"Device:           {service.device}")
-    print(f"Language:         {args.language}")
-    print(f"Input text:       {args.text}")
-    print(f"Reference audio:  {ref_path}")
-    print(f"Output path:      {out_path}")
-    print(f"Speech speed:     {args.speed}")
-    print(f"Tau:              {args.tau}")
+    print("Device:           {}".format(service.device))
+    print("Language:         {}".format(args.language))
+    print("Input text:       {}".format(args.text))
+    print("Reference audio:  {}".format(ref_path))
+    print("Output path:      {}".format(out_path))
+    print("Speech speed:     {}".format(args.speed))
+    print("Tau:              {}".format(args.tau))
     print("-" * 60)
 
     try:
@@ -717,18 +1115,18 @@ def main() -> None:
             language=args.language,
         )
         print("RESULT: SUCCESS")
-        print(f"Generated Audio Duration: {result.duration_seconds:.2f}s")
-        print(f"Audio Sample Rate:        {result.sample_rate} Hz")
-        print(f"Output File Size:         {result.file_size_bytes:,} bytes")
-        print(f"Base TTS Time:            {result.base_tts_duration_seconds:.2f}s")
-        print(f"Tone Conversion Time:     {result.tone_conversion_duration_seconds:.2f}s")
-        print(f"Total Pipeline Time:      {result.total_duration_seconds:.2f}s")
-        print(f"Peak VRAM Allocated:      {result.peak_vram_allocated_mb:.2f} MB")
-        print(f"Peak VRAM Reserved:       {result.peak_vram_reserved_mb:.2f} MB")
-        print(f"Watermark Applied:        {result.watermark_applied}")
+        print("Generated Audio Duration: {:.2f}s".format(result.duration_seconds))
+        print("Audio Sample Rate:        {} Hz".format(result.sample_rate))
+        print("Output File Size:         {:,} bytes".format(result.file_size_bytes))
+        print("Base TTS Time:            {:.2f}s".format(result.base_tts_duration_seconds))
+        print("Tone Conversion Time:     {:.2f}s".format(result.tone_conversion_duration_seconds))
+        print("Total Pipeline Time:      {:.2f}s".format(result.total_duration_seconds))
+        print("Peak VRAM Allocated:      {:.2f} MB".format(result.peak_vram_allocated_mb))
+        print("Peak VRAM Reserved:       {:.2f} MB".format(result.peak_vram_reserved_mb))
+        print("Watermark Applied:        {}".format(result.watermark_applied))
         print("=" * 60)
     except Exception as exc:
-        print(f"RESULT: FAILED - {exc}")
+        print("RESULT: FAILED - {}".format(exc))
         sys.exit(1)
 
 

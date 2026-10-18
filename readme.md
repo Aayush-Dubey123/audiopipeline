@@ -192,6 +192,8 @@ Gemini, Groq, and OpenRouter free tiers may help with optional language tasks, b
 - Use voices that the operator owns, has permission to use, or is otherwise authorized to process.
 - Do not provide a workflow intended for deceptive impersonation or fraudulent statements.
 - Clearly label generated and converted audio as synthetic.
+  > [!NOTE]
+  > **Audio Provenance & Metadata Disclosure:** Generated and converted audio streams embed synthetic attribution metadata tags (`AI Synthesized Speech` / `AI-generated`). Cryptographic C2PA manifest signing (using PKI certificate authorities and cryptographic signatures) is not implemented in this local build; metadata tags are informational labels.
 - Never expose API keys, internal model paths, or administrative endpoints to the browser.
 - Validate uploaded files and reject unsupported or excessively large inputs.
 - Restrict file access and prevent arbitrary filesystem paths from being supplied by users.

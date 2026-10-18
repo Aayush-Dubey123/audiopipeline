@@ -23,7 +23,6 @@ export const JobHistory: React.FC<JobHistoryProps> = ({ jobs, onDeleteJob, onPla
       await api.deleteJob(jobId);
       onDeleteJob(jobId);
     } catch {
-      // Optimistic delete
       onDeleteJob(jobId);
     }
   };
@@ -32,52 +31,52 @@ export const JobHistory: React.FC<JobHistoryProps> = ({ jobs, onDeleteJob, onPla
     switch (status) {
       case 'completed':
         return (
-          <span className="badge badge-success">
+          <span className="status-pill status-ready" style={{ fontSize: '0.75rem', padding: '3px 8px' }}>
             <CheckCircle2 size={12} /> Completed
           </span>
         );
       case 'processing':
         return (
-          <span className="badge badge-violet animate-pulse-glow">
-            <Loader2 size={12} className="animate-spin" /> Processing
+          <span className="status-pill status-needs-voices" style={{ fontSize: '0.75rem', padding: '3px 8px' }}>
+            <Loader2 size={12} className="pulse-dot" /> Processing
           </span>
         );
       case 'queued':
         return (
-          <span className="badge badge-cyan">
+          <span className="status-pill status-coming-soon" style={{ fontSize: '0.75rem', padding: '3px 8px' }}>
             <Clock size={12} /> Queued
           </span>
         );
       case 'failed':
         return (
-          <span className="badge badge-danger">
+          <span className="status-pill" style={{ backgroundColor: '#fee2e2', color: '#b91c1c', border: '1px solid #fecaca', fontSize: '0.75rem', padding: '3px 8px' }}>
             <AlertCircle size={12} /> Failed
           </span>
         );
       default:
-        return <span className="badge">{status}</span>;
+        return <span className="status-pill status-coming-soon">{status}</span>;
     }
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+    <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '32px 24px', display: 'flex', flexDirection: 'column', gap: '24px' }}>
       <div>
-        <h2 style={{ fontSize: '1.75rem', fontWeight: 800 }} className="gradient-text">
-          Session Generation History
-        </h2>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.95rem' }}>
+        <h1 style={{ fontSize: '2rem', fontWeight: 800, letterSpacing: '-0.02em', color: 'var(--text-primary)', marginBottom: '8px' }}>
+          Generation History
+        </h1>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '0.9375rem' }}>
           Real-time tracking of jobs processed during this session. Output audio files are retained on the server for 60 minutes.
         </p>
       </div>
 
       {jobs.length === 0 ? (
-        <div className="glass-panel" style={{ padding: '60px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+        <div className="studio-card" style={{ padding: '64px 24px', textAlign: 'center', color: 'var(--text-muted)' }}>
           <Clock size={40} style={{ margin: '0 auto 16px auto', opacity: 0.4 }} />
-          <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '6px' }}>
-            No Active Generations Yet
+          <h3 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '6px' }}>
+            No generation jobs yet
           </h3>
-          <p style={{ fontSize: '0.9rem', maxWidth: '420px', margin: '0 auto' }}>
-            Submit a Text-to-Speech synthesis or Voice Conversion request in the studio to monitor its inference status and download results here.
+          <p style={{ fontSize: '0.875rem', maxWidth: '420px', margin: '0 auto' }}>
+            Submit a Text-to-Speech synthesis or Voice Conversion request to monitor its status and download audio results here.
           </p>
         </div>
       ) : (
@@ -89,61 +88,58 @@ export const JobHistory: React.FC<JobHistoryProps> = ({ jobs, onDeleteJob, onPla
             return (
               <div
                 key={job.job_id}
-                className="glass-panel"
+                className="studio-card"
                 style={{
-                  padding: '16px 20px',
+                  padding: '18px 24px',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   flexWrap: 'wrap',
                   gap: '14px',
-                  borderRadius: '14px',
                 }}
               >
-                {/* Left Info */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
                   <div style={{
-                    width: '42px',
-                    height: '42px',
-                    borderRadius: '10px',
-                    background: job.kind === 'vc' ? 'rgba(6, 182, 212, 0.15)' : 'rgba(139, 92, 246, 0.15)',
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: 'var(--radius-md)',
+                    backgroundColor: 'var(--bg-tertiary)',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    border: `1px solid ${job.kind === 'vc' ? 'rgba(6, 182, 212, 0.3)' : 'rgba(139, 92, 246, 0.3)'}`,
+                    border: '1px solid var(--border-subtle)',
                   }}>
-                    <Volume2 size={20} color={job.kind === 'vc' ? 'var(--accent-cyan)' : 'var(--accent-violet)'} />
+                    <Volume2 size={18} color="var(--accent-green)" />
                   </div>
 
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ fontWeight: 700, fontSize: '0.95rem' }}>
+                      <span style={{ fontWeight: 700, fontSize: '0.9375rem', color: 'var(--text-primary)' }}>
                         {job.kind === 'tts'
-                          ? 'Text-to-Speech'
+                          ? 'Text to voice'
                           : job.kind === 'tts_custom'
-                          ? 'Custom Voice Clone'
-                          : 'Voice Conversion'}
+                          ? 'Custom voice clone'
+                          : 'Voice to voice'}
                       </span>
                       {getStatusBadge(job.status)}
                     </div>
 
-                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                    <p style={{ fontSize: '0.8125rem', color: 'var(--text-muted)', marginTop: '2px' }}>
                       {job.progress_message || `Job ID: ${job.job_id}`}
                       {isFailed && job.error_message && (
-                        <span style={{ color: 'var(--danger)', marginLeft: '6px' }}>— {job.error_message}</span>
+                        <span style={{ color: '#b91c1c', marginLeft: '6px' }}>— {job.error_message}</span>
                       )}
                     </p>
                   </div>
                 </div>
 
-                {/* Right Actions */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   {isCompleted && job.output_url && (
                     <>
                       <button
                         onClick={() => onPlayJob(job)}
-                        className="btn btn-primary btn-sm"
-                        title="Load in Audio Player"
+                        className="btn-primary"
+                        style={{ padding: '6px 12px', fontSize: '0.8125rem' }}
                       >
                         <Volume2 size={14} />
                         <span>Play</span>
@@ -152,8 +148,8 @@ export const JobHistory: React.FC<JobHistoryProps> = ({ jobs, onDeleteJob, onPla
                       <a
                         href={job.output_url}
                         download={`audio_${job.job_id}.wav`}
-                        className="btn btn-secondary btn-sm"
-                        title="Download WAV"
+                        className="btn-secondary"
+                        style={{ padding: '6px 12px', fontSize: '0.8125rem', textDecoration: 'none' }}
                       >
                         <Download size={14} />
                         <span>WAV</span>
@@ -163,9 +159,9 @@ export const JobHistory: React.FC<JobHistoryProps> = ({ jobs, onDeleteJob, onPla
 
                   <button
                     onClick={() => handleDelete(job.job_id)}
-                    className="btn btn-secondary btn-sm"
-                    title="Remove from history & delete server artifacts"
-                    style={{ color: 'var(--text-muted)' }}
+                    className="btn-secondary"
+                    title="Remove job"
+                    style={{ padding: '6px 10px', color: 'var(--text-muted)' }}
                   >
                     <Trash2 size={14} />
                   </button>
