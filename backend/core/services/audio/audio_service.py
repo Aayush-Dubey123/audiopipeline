@@ -108,7 +108,7 @@ class AudioService:
         cmd = [
             "ffprobe",
             "-v", "error",
-            "-show_entries", "format=duration,format_name:stream=sample_rate,channels",
+            "-show_entries", "format=duration,format_name:stream=duration,sample_rate,channels",
             "-of", "json",
             str(file_path),
         ]
@@ -131,7 +131,17 @@ class AudioService:
                 raise AudioCorruptError(f"No valid audio streams found in {file_path.name}")
 
             audio_stream = streams[0]
-            duration = float(format_info.get("duration", 0.0))
+            format_dur = float(format_info.get("duration", 0.0))
+            stream_dur = audio_stream.get("duration")
+            if stream_dur and stream_dur != "N/A":
+                try:
+                    parsed_stream_dur = float(stream_dur)
+                    duration = parsed_stream_dur if parsed_stream_dur > 0 else format_dur
+                except (ValueError, TypeError):
+                    duration = format_dur
+            else:
+                duration = format_dur
+
             sample_rate = int(audio_stream.get("sample_rate", 0))
             channels = int(audio_stream.get("channels", 0))
             format_name = format_info.get("format_name", "unknown")
@@ -358,6 +368,7 @@ class AudioService:
         cmd.extend([
             "-b:a", bitrate,
             "-id3v2_version", "3",
+            "-write_xing", "1",
             "-metadata", f"comment={label}",
             "-metadata", f"description={label}",
             "-metadata", "artist=AI Voice Studio",

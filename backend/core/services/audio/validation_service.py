@@ -432,11 +432,22 @@ class ValidationService:
         speech_peak = float(np.percentile(en_db, 90))
         snr_db = round(max(0.0, speech_peak - noise_floor), 1)
 
-        # Speech length
-        speech_thresh = max(noise_floor + 6.0, -45.0)
+        # Speech length calculation based on dynamic SNR range
+        if snr_db >= 4.0:
+            dynamic_thresh = noise_floor + 0.30 * (speech_peak - noise_floor)
+            speech_thresh = min(dynamic_thresh, speech_peak - 3.0)
+        else:
+            speech_thresh = noise_floor + 2.0
+
         speech_mask = en_db >= speech_thresh
         speech_frames = int(np.sum(speech_mask))
         speech_length = round(speech_frames * (hop / sr), 2)
+
+        # Fallback safeguard: if total duration is >= 2.0s and audio has audible volume,
+        # speech length must never drop to 0.0 if frames exceed basic noise floor
+        if speech_length < 0.5 and total_duration >= 2.0 and loudness_dbfs > -52.0:
+            audible_mask = en_db >= (noise_floor + 2.0)
+            speech_length = round(float(np.sum(audible_mask)) * (hop / sr), 2)
 
         # Reverb / echo estimate
         reverb_level = "low"

@@ -873,11 +873,10 @@ class JobController:
             res = ValidationService.check_reference_safety(ref_path)
             return ReferenceCheckResponse(**res)
         else:
-            default_ref = settings.voices_path / "reference" / "client_ref.wav"
-            if not default_ref.exists():
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No reference file available to check")
-            res = ValidationService.check_reference_safety(default_ref)
-            return ReferenceCheckResponse(**res)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either an audio file or voice_id must be provided to evaluate acoustic safety.",
+            )
 
     @classmethod
     def generate_tts_preview(
@@ -887,7 +886,7 @@ class JobController:
         request: TTSPreviewRequest,
     ) -> TTSPreviewResponse:
         """
-        Generate rapid preview of up to 200 characters using the voice pipeline.
+        Generate rapid preview of up to 200 characters using the catalog voice pipeline.
 
         Supports both asynchronous job queuing with stage tracking and direct synchronous generation.
 
@@ -900,11 +899,12 @@ class JobController:
             TTSPreviewResponse: Structured preview confirmation with job_id and preview_url.
 
         Raises:
-            HTTPException 400: If text is empty.
-            HTTPException 404: If reference audio cannot be found.
+            HTTPException 400: If text or voice_id is empty.
+            HTTPException 404: If voice or reference audio cannot be found.
             HTTPException 500: If synchronous synthesis fails.
         """
         logging.info("Executing JobController.generate_tts_preview")
+        import hashlib
         import uuid
         from datetime import datetime, timezone, timedelta
         from core.services.jobs.job_worker import job_worker
@@ -913,22 +913,30 @@ class JobController:
         if not preview_text:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Text cannot be empty.")
 
-        ref_path = None
-        voice = None
-        if request.voice_id:
-            voice = VoiceCRUD.get_voice_by_id(db, request.voice_id)
-            if voice and hasattr(voice, "asset_file") and voice.asset_file:
-                p = (settings.voices_path / voice.asset_file).resolve()
-                if p.exists():
-                    ref_path = p
+        if not request.voice_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A voice_id is required for saved voice preview. For custom reference audio, use the custom preview endpoint.",
+            )
 
-        if not ref_path:
-            p = (settings.voices_path / "reference" / "client_ref.wav").resolve()
-            if p.exists():
-                ref_path = p
+        voice = VoiceCRUD.get_voice_by_id(db, request.voice_id)
+        if not voice:
+            logging.warning(f"Preview submission rejected: voice '{request.voice_id}' not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Voice '{request.voice_id}' was not found in the catalog.",
+            )
 
-        if not ref_path or not ref_path.exists():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reference audio for preview not found.")
+        ref_path = (settings.voices_path / voice.asset_file).resolve()
+        if not ref_path.exists():
+            logging.error(f"Voice '{voice.id}' preview audio asset missing on disk: {ref_path}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Voice asset for '{voice.name}' not found on disk.",
+            )
+
+        ref_hash = hashlib.sha256(ref_path.read_bytes()).hexdigest()[:16]
+        logging.info(f"Generating preview for voice '{voice.id}': ref_hash='{ref_hash}'")
 
         job_id = uuid.uuid4().hex
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.JOB_TTL_MINUTES)
@@ -943,14 +951,15 @@ class JobController:
                 "stage": "Queued",
                 "stage_index": 1,
                 "stage_total": 4,
-                "voice_id": request.voice_id or "client_ref",
+                "voice_id": voice.id,
                 "client_key": client_key,
                 "progress_message": "Preview job queued.",
                 "payload": {
                     "text": preview_text,
-                    "voice_id": request.voice_id,
+                    "voice_id": voice.id,
                     "language": request.language or "hi",
                     "speed": request.speed,
+                    "ref_hash": ref_hash,
                 },
                 "created_at": now,
                 "updated_at": now,
@@ -995,18 +1004,20 @@ class JobController:
                 "stage": "Completed",
                 "stage_index": 4,
                 "stage_total": 4,
-                "voice_id": request.voice_id or "client_ref",
+                "voice_id": voice.id,
                 "client_key": client_key,
                 "progress_message": "Preview generation completed.",
                 "payload": {
                     "text": preview_text,
-                    "voice_id": request.voice_id,
+                    "voice_id": voice.id,
                     "language": request.language or "hi",
                     "speed": request.speed,
+                    "ref_hash": ref_hash,
                 },
                 "output_metadata": {
                     "duration_seconds": round(meta.duration_seconds, 2),
                     "confidence_label": "good",
+                    "ref_hash": ref_hash,
                 },
                 "created_at": now,
                 "started_at": now,
@@ -1019,16 +1030,123 @@ class JobController:
             logging.error(f"Preview generation failed: {err}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Preview generation failed: {err}",
+                detail=f"Preview synthesis failed: {err}",
             )
 
-        conf_label = "good"
         return TTSPreviewResponse(
             job_id=job_id,
             preview_url=f"/v1/audio/preview/{job_id}",
             duration_seconds=round(meta.duration_seconds, 2),
             text_preview=preview_text,
-            confidence_label=conf_label,
+            confidence_label="good",
+        )
+
+    @classmethod
+    async def generate_custom_tts_preview(
+        cls,
+        db: Session,
+        client_key: str,
+        text: str,
+        file: UploadFile,
+        language: str = "hi",
+        speed: float = 1.0,
+        consent: bool = True,
+    ) -> TTSPreviewResponse:
+        """
+        Generate rapid preview of up to 200 characters conditioned on custom reference audio.
+
+        Args:
+            db (Session): Active database session.
+            client_key (str): Hashed client token.
+            text (str): Input text (up to 200 characters).
+            file (UploadFile): Reference audio recording or file.
+            language (str): Target language ('hi', 'en', 'mr').
+            speed (float): Playback speed modifier.
+            consent (bool): Explicit voice cloning authorization confirmation.
+
+        Returns:
+            TTSPreviewResponse: Structured preview confirmation with job_id and preview_url.
+
+        Raises:
+            HTTPException 400: If consent is missing, text is empty, or reference audio is invalid.
+        """
+        logging.info("Executing JobController.generate_custom_tts_preview")
+        if not consent:
+            logging.warning("Custom TTS preview rejected: user consent was not given")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Explicit consent is required before generating speech conditioned on custom reference audio.",
+            )
+
+        clean_text = text.strip()[:200]
+        if not clean_text:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Text cannot be empty.")
+
+        import hashlib
+        import uuid
+        from datetime import datetime, timezone, timedelta
+        from core.services.jobs.job_worker import job_worker
+        from core.services.audio.audio_service import AudioService
+        from core.services.jobs.cleanup_service import CleanupService
+
+        job_id = uuid.uuid4().hex
+        job_dir = (settings.tmp_path / job_id).resolve()
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        temp_upload_path = None
+        try:
+            temp_upload_path = await ValidationService.stream_upload_to_disk(
+                upload_file=file,
+                destination_dir=job_dir,
+            )
+            dest_wav = job_dir / "reference.wav"
+            AudioService.to_wav(temp_upload_path, dest_wav)
+            AudioService.resample(dest_wav, dest_wav, target_sample_rate=24000)
+
+            ref_hash = hashlib.sha256(dest_wav.read_bytes()).hexdigest()[:16]
+            logging.info(f"Custom preview reference saved: job_id='{job_id}', hash='{ref_hash}'")
+        except Exception as exc:
+            CleanupService.cleanup_job_directory(job_id)
+            logging.error(f"Error processing custom preview reference: {exc}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to process reference audio: {exc}")
+        finally:
+            if temp_upload_path and temp_upload_path.exists() and temp_upload_path.name != "reference.wav":
+                temp_upload_path.unlink(missing_ok=True)
+
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(minutes=settings.JOB_TTL_MINUTES)
+
+        job_data = {
+            "id": job_id,
+            "kind": "preview",
+            "status": "queued",
+            "stage": "Queued",
+            "stage_index": 1,
+            "stage_total": 4,
+            "voice_id": None,
+            "client_key": client_key,
+            "progress_message": "Custom preview job queued.",
+            "payload": {
+                "text": clean_text,
+                "voice_id": None,
+                "language": language or "hi",
+                "speed": float(speed),
+                "is_custom": True,
+                "ref_hash": ref_hash,
+            },
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": expires_at,
+        }
+        JobCRUD.create_job(db, job_data)
+        job_worker.enqueue_job(job_id)
+
+        return TTSPreviewResponse(
+            job_id=job_id,
+            preview_url=f"/v1/audio/preview/{job_id}",
+            duration_seconds=0.0,
+            text_preview=clean_text,
+            confidence_label="good",
         )
 
     @classmethod

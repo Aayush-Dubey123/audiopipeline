@@ -19,10 +19,23 @@ export const App: React.FC = () => {
   const [voices, setVoices] = useState<Voice[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [config, setConfig] = useState<PublicConfigResponse | null>(null);
-  const [jobs, setJobs] = useState<JobStatusResponse[]>([]);
+  const [jobs, setJobs] = useState<JobStatusResponse[]>(() => {
+    try {
+      const saved = localStorage.getItem('voice_studio_jobs');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastType, setToastType] = useState<'info' | 'success' | 'error'>('info');
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('voice_studio_jobs', JSON.stringify(jobs));
+    } catch {}
+  }, [jobs]);
 
   useEffect(() => {
     let isMounted = true;

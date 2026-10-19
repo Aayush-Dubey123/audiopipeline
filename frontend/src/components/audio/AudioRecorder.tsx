@@ -600,7 +600,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 <div
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))',
                     gap: '4px',
                     fontSize: '11px',
                     color: 'var(--color-text-secondary)',
@@ -609,7 +609,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                     borderBottom: '1px solid rgba(0,0,0,0.06)',
                   }}
                 >
-                  <span>Speech: <strong>{checkResult.metrics.speech_length_s}s</strong></span>
+                  <span>Duration: <strong>{(checkResult.metrics.total_duration_s ?? checkResult.metrics.speech_length_s).toFixed(1)}s</strong></span>
+                  <span>Speech: <strong>{checkResult.metrics.speech_length_s.toFixed(1)}s</strong></span>
                   <span>SNR: <strong>{checkResult.metrics.snr_db} dB</strong></span>
                   <span>Loudness: <strong>{checkResult.metrics.loudness_dbfs} dBFS</strong></span>
                   <span>Clip: <strong>{(checkResult.metrics.clipping_ratio * 100).toFixed(1)}%</strong></span>

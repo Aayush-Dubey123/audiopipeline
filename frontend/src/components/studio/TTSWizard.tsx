@@ -9,6 +9,7 @@ import type {
   PublicConfigResponse,
   JobStatusResponse,
   ReferenceCheckResponse,
+  TTSPreviewResponse,
 } from '../../lib/types';
 import { api } from '../../lib/api';
 import { Stepper } from '../navigation/Stepper';
@@ -299,8 +300,20 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
     setIsScriptCheckOpen(false);
   };
 
+  // Invalidate downstream preview & full audio when voice or reference changes
+  const invalidateDownstreamOutputs = () => {
+    setPreviewAudioUrl(null);
+    setPreviewJobId(null);
+    setPreviewConfidence(null);
+    setPreviewError(null);
+    setActiveJobId(null);
+    setActiveJob(null);
+    setFullAudioError(null);
+  };
+
   // Reference Audio Handler
   const handleReferenceReady = async (file: File) => {
+    invalidateDownstreamOutputs();
     setReferenceFile(file);
     if (referenceUrlRef.current) {
       URL.revokeObjectURL(referenceUrlRef.current);
@@ -324,6 +337,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
   };
 
   const handleClearReference = () => {
+    invalidateDownstreamOutputs();
     if (referenceUrlRef.current) {
       URL.revokeObjectURL(referenceUrlRef.current);
       referenceUrlRef.current = null;
@@ -343,14 +357,39 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
     setPreviewLastUpdate(Date.now());
 
     const previewText = script.trim().slice(0, 200);
+    if (!previewText) {
+      setIsPreviewGenerating(false);
+      setPreviewError('Script text is empty. Enter some text in Step 1 to generate a preview.');
+      return;
+    }
 
     try {
-      const res = await api.getTTSPreview({
-        text: previewText,
-        voiceId: voiceMode === 'saved' ? selectedVoiceId : undefined,
-        language,
-        speed: 1.0,
-      });
+      let res: TTSPreviewResponse;
+      if (voiceMode === 'saved') {
+        if (!selectedVoiceId) {
+          throw new Error('Please select a saved voice from the catalog.');
+        }
+        res = await api.getTTSPreview({
+          text: previewText,
+          voiceId: selectedVoiceId,
+          language,
+          speed: 1.0,
+        });
+      } else {
+        if (!referenceFile) {
+          throw new Error('Please record or upload a reference voice in Step 2 before generating a preview.');
+        }
+        if (!consent) {
+          throw new Error('Explicit consent confirmation is required before generating custom reference voice speech.');
+        }
+        res = await api.getCustomTTSPreview({
+          text: previewText,
+          file: referenceFile,
+          language,
+          speed: 1.0,
+          consent,
+        });
+      }
 
       if (res.job_id) {
         setPreviewJobId(res.job_id);
@@ -783,7 +822,12 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
               >
                 <button
                   type="button"
-                  onClick={() => setVoiceMode('saved')}
+                  onClick={() => {
+                    if (voiceMode !== 'saved') {
+                      setVoiceMode('saved');
+                      invalidateDownstreamOutputs();
+                    }
+                  }}
                   className="touch-target"
                   style={{
                     border: 'none',
@@ -802,7 +846,12 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => setVoiceMode('reference')}
+                  onClick={() => {
+                    if (voiceMode !== 'reference') {
+                      setVoiceMode('reference');
+                      invalidateDownstreamOutputs();
+                    }
+                  }}
                   className="touch-target"
                   style={{
                     border: 'none',
@@ -829,110 +878,248 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
 
             {/* Saved Voices View */}
             {voiceMode === 'saved' ? (
-              <div
-                className="inner-scroll-x"
-                style={{
-                  display: 'flex',
-                  gap: 'var(--space-2)',
-                  padding: 'var(--space-1) 0',
-                  height: '100%',
-                  alignItems: 'flex-start',
-                }}
-              >
-                {voices.map((v) => {
-                  const isSelected = selectedVoiceId === v.id;
-                  return (
+              voices.length === 0 ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flex: 1,
+                    gap: 'var(--space-2)',
+                    textAlign: 'center',
+                    padding: 'var(--space-3)',
+                    backgroundColor: 'var(--color-surface-muted)',
+                    borderRadius: 'var(--radius-control)',
+                    border: '1px dashed var(--color-border)',
+                  }}
+                >
+                  <span style={{ fontSize: '32px' }}>🎙️</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', maxWidth: '420px' }}>
+                    <span style={{ fontSize: 'var(--font-base)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                      No Saved Studio Voices Available
+                    </span>
+                    <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.4, margin: 0 }}>
+                      No catalog studio voices are registered in this environment. You can easily generate high-fidelity speech using your own voice by switching to custom reference audio.
+                    </p>
+                  </div>
+                  <Button
+                    variant="primary"
+                    size="base"
+                    onClick={() => {
+                      setVoiceMode('reference');
+                      invalidateDownstreamOutputs();
+                    }}
+                  >
+                    Switch to Custom Reference Audio →
+                  </Button>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                    gap: 'var(--space-3)',
+                    flex: 1,
+                    minHeight: 0,
+                    alignItems: 'start',
+                    overflowY: 'auto',
+                    padding: 'var(--space-0-5) 0',
+                  }}
+                >
+                  {/* Left Column: Compact Selected Voice Card */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 'var(--space-2)',
+                      padding: 'var(--space-2)',
+                      borderRadius: 'var(--radius-control)',
+                      backgroundColor: 'var(--color-surface)',
+                      border: '1px solid var(--color-border)',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                    }}
+                  >
+                    {/* Header: Name, Style, and Selector (if multiple) */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                        <span style={{ fontSize: 'var(--font-base)', fontWeight: 700, color: 'var(--color-text-primary)' }}>
+                          {activeVoice?.name || 'Selected Voice'}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: '11px',
+                            fontWeight: 600,
+                            padding: '2px 8px',
+                            borderRadius: '12px',
+                            backgroundColor: 'var(--color-accent-light)',
+                            color: 'var(--color-accent)',
+                          }}
+                        >
+                          {activeVoice?.style || 'Conversational'}
+                        </span>
+                      </div>
+
+                      <span
+                        style={{
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          backgroundColor: 'var(--color-success-bg)',
+                          color: 'var(--color-success)',
+                          border: '1px solid var(--color-success-border)',
+                        }}
+                      >
+                        Active Voice ✓
+                      </span>
+                    </div>
+
+                    {/* Selector if multiple voices exist */}
+                    {voices.length > 1 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)' }}>
+                        <span style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', fontWeight: 500 }}>
+                          Select Voice:
+                        </span>
+                        <select
+                          value={selectedVoiceId}
+                          onChange={(e) => {
+                            if (selectedVoiceId !== e.target.value) {
+                              setSelectedVoiceId(e.target.value);
+                              invalidateDownstreamOutputs();
+                            }
+                          }}
+                          style={{
+                            flex: 1,
+                            height: '34px',
+                            padding: '0 8px',
+                            borderRadius: 'var(--radius-control)',
+                            border: '1px solid var(--color-border)',
+                            backgroundColor: 'var(--color-surface-muted)',
+                            fontSize: 'var(--font-sm)',
+                            color: 'var(--color-text-primary)',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          {voices.map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.name} ({v.languages.join(', ').toUpperCase()})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.45, margin: 0 }}>
+                      {activeVoice?.description || 'Natural speech voice profile calibrated for high-fidelity zero-distortion synthesis.'}
+                    </p>
+
+                    {/* Specifications Grid */}
                     <div
-                      key={v.id}
-                      onClick={() => setSelectedVoiceId(v.id)}
                       style={{
-                        minWidth: '240px',
-                        maxWidth: '280px',
-                        padding: 'var(--space-2)',
-                        borderRadius: 'var(--radius-control)',
-                        border: `2px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-border)'}`,
-                        backgroundColor: isSelected ? 'var(--color-accent-light)' : 'var(--color-surface)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'space-between',
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
                         gap: 'var(--space-1)',
-                        cursor: 'pointer',
-                        flexShrink: 0,
-                        transition: 'border-color 150ms ease, background-color 150ms ease',
+                        padding: 'var(--space-1) var(--space-2)',
+                        backgroundColor: 'var(--color-surface-muted)',
+                        borderRadius: 'var(--radius-control)',
+                        border: '1px solid var(--color-border)',
                       }}
                     >
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span style={{ fontSize: 'var(--font-base)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
-                            {v.name}
-                          </span>
-                          {isSelected && (
-                            <span
-                              style={{
-                                fontSize: '11px',
-                                fontWeight: 700,
-                                color: 'var(--color-accent)',
-                                backgroundColor: '#ffffff',
-                                padding: '1px 6px',
-                                borderRadius: '10px',
-                                border: '1px solid var(--color-accent-border)',
-                              }}
-                            >
-                              Selected ✓
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Language Badges */}
-                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                          {(v.languages || ['hi', 'en']).map((lang) => (
+                      <div>
+                        <span style={{ fontSize: '10px', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
+                          Supported Languages
+                        </span>
+                        <div style={{ display: 'flex', gap: '4px', marginTop: '2px', flexWrap: 'wrap' }}>
+                          {(activeVoice?.languages || ['hi', 'en', 'mr']).map((lang) => (
                             <span
                               key={lang}
                               style={{
                                 fontSize: '10px',
-                                padding: '1px 5px',
+                                fontWeight: 700,
+                                padding: '1px 6px',
                                 borderRadius: '4px',
-                                backgroundColor: 'var(--color-surface-muted)',
-                                color: 'var(--color-text-secondary)',
-                                fontWeight: 600,
+                                backgroundColor: 'var(--color-surface)',
+                                color: 'var(--color-text-primary)',
+                                border: '1px solid var(--color-border)',
                                 textTransform: 'uppercase',
                               }}
                             >
-                              {lang}
+                              {lang === 'hi' ? 'HI (हिन्दी)' : lang === 'mr' ? 'MR (मराठी)' : 'EN (English)'}
                             </span>
                           ))}
-                          <span
-                            style={{
-                              fontSize: '10px',
-                              padding: '1px 5px',
-                              borderRadius: '4px',
-                              backgroundColor: 'var(--color-neutral-pill-bg)',
-                              color: 'var(--color-neutral-pill-text)',
-                            }}
-                          >
-                            {v.style || 'Conversational'}
-                          </span>
                         </div>
-
-                        <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.35 }}>
-                          {v.description || 'Natural speech voice profile.'}
-                        </p>
                       </div>
 
-                      {/* Preview Button */}
-                      {v.has_preview && (
-                        <div style={{ marginTop: 'var(--space-1)' }} onClick={(e) => e.stopPropagation()}>
-                          <AudioPlayer
-                            src={api.getVoicePreviewUrl(v.id)}
-                            title="Sample Voice Preview"
-                            compact
-                          />
+                      <div>
+                        <span style={{ fontSize: '10px', color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
+                          Synthesis Engine
+                        </span>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--color-text-primary)', marginTop: '2px' }}>
+                          Chatterbox Multilingual
                         </div>
-                      )}
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
+
+                    {/* Voice Sample Audio Player */}
+                    {activeVoice && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginTop: 'var(--space-0-5)' }}>
+                        <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                          Sample Voice Preview
+                        </span>
+                        <AudioPlayer
+                          src={api.getVoicePreviewUrl(activeVoice.id)}
+                          title={`${activeVoice.name} Sample Preview`}
+                          compact
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right Column: Studio Guidelines & Pacing Advice */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 'var(--space-2)',
+                      padding: 'var(--space-2)',
+                      borderRadius: 'var(--radius-control)',
+                      backgroundColor: 'var(--color-surface-muted)',
+                      border: '1px solid var(--color-border)',
+                    }}
+                  >
+                    <span style={{ fontSize: 'var(--font-sm)', fontWeight: 700, color: 'var(--color-text-primary)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                      Studio Voice Overview
+                    </span>
+
+                    <ul style={{ margin: 0, paddingLeft: '18px', fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.5, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <li>
+                        <strong>Pre-indexed Conditioning:</strong> Uses local reference recording certified for zero acoustic noise floor and natural dynamics.
+                      </li>
+                      <li>
+                        <strong>Zero Upload Wait:</strong> Synthesis begins immediately without uploading microphone or local audio files.
+                      </li>
+                      <li>
+                        <strong>Calibrated Cadence:</strong> Optimized for conversational pacing across English, Hindi, and Marathi scripts.
+                      </li>
+                    </ul>
+
+                    <div
+                      style={{
+                        padding: 'var(--space-1) var(--space-2)',
+                        backgroundColor: 'var(--color-accent-light)',
+                        borderRadius: 'var(--radius-control)',
+                        border: '1px solid var(--color-accent-border)',
+                        fontSize: '11px',
+                        color: 'var(--color-accent)',
+                        lineHeight: 1.4,
+                      }}
+                    >
+                      💡 Want to clone your own voice instead? Click <strong>Custom Reference Audio</strong> above to record or upload a sample.
+                    </div>
+                  </div>
+                </div>
+              )
             ) : (
               /* Custom Reference: Microphone Recording & File Upload */
               <div style={{ flex: 1, minHeight: 0 }}>
@@ -972,7 +1159,14 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                 <span style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>Preview Audio (First ~200 Characters)</span>
                 <span style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-muted)' }}>
-                  Selected voice: <strong>{voiceMode === 'saved' ? activeVoice?.name || 'Saved voice' : 'Custom reference'}</strong>
+                  Selected voice:{' '}
+                  <strong>
+                    {voiceMode === 'saved'
+                      ? activeVoice?.name || 'Saved voice'
+                      : referenceFile
+                      ? `Custom reference (${referenceFile.name})`
+                      : 'Custom reference (No audio yet)'}
+                  </strong>
                 </span>
               </div>
               <div
@@ -1045,6 +1239,56 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                       Sounds right, continue →
                     </Button>
                   </div>
+                </div>
+              ) : voiceMode === 'reference' && !referenceFile ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 'var(--space-2)',
+                    padding: 'var(--space-3)',
+                    backgroundColor: 'var(--color-surface-muted)',
+                    borderRadius: 'var(--radius-control)',
+                    border: '1px dashed var(--color-border)',
+                    maxWidth: '460px',
+                    textAlign: 'center',
+                  }}
+                >
+                  <span style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>
+                    Reference audio clip required
+                  </span>
+                  <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.4, margin: 0 }}>
+                    You have selected Custom Reference Audio mode. Record or upload your reference speech in Step 2 to generate a preview.
+                  </p>
+                  <Button variant="primary" size="base" onClick={() => setCurrentStep(2)}>
+                    ← Go to Step 2: Voice
+                  </Button>
+                </div>
+              ) : voiceMode === 'reference' && !consent ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 'var(--space-2)',
+                    padding: 'var(--space-3)',
+                    backgroundColor: 'var(--color-surface-muted)',
+                    borderRadius: 'var(--radius-control)',
+                    border: '1px dashed var(--color-warning-border, #f59e0b)',
+                    maxWidth: '460px',
+                    textAlign: 'center',
+                  }}
+                >
+                  <span style={{ fontSize: 'var(--font-base)', fontWeight: 600, color: 'var(--color-warning, #d97706)' }}>
+                    Consent confirmation required
+                  </span>
+                  <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.4, margin: 0 }}>
+                    You must confirm ownership or authorization for voice cloning in Step 2 before synthesizing speech.
+                  </p>
+                  <Button variant="primary" size="base" onClick={() => setCurrentStep(2)}>
+                    Review Consent in Step 2 →
+                  </Button>
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--space-1)' }}>
@@ -1150,7 +1394,19 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                   {/* Left Column: Player with seek and speed + AI-generated badge */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>Master Output Audio</span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                        <span style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>Master Output Audio</span>
+                        <span style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                          Target voice:{' '}
+                          <strong>
+                            {voiceMode === 'saved'
+                              ? activeVoice?.name || selectedVoiceId
+                              : referenceFile
+                              ? `Custom Reference (${referenceFile.name})`
+                              : 'Custom Reference'}
+                          </strong>
+                        </span>
+                      </div>
                       <span
                         style={{
                           fontSize: 'var(--font-sm)',
@@ -1282,6 +1538,56 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                   </span>
                   <Button variant="primary" size="base" onClick={handleResumeJob}>
                     Resume generation
+                  </Button>
+                </div>
+              ) : voiceMode === 'reference' && !referenceFile ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 'var(--space-2)',
+                    padding: 'var(--space-3)',
+                    backgroundColor: 'var(--color-surface-muted)',
+                    borderRadius: 'var(--radius-control)',
+                    border: '1px dashed var(--color-border)',
+                    maxWidth: '460px',
+                    textAlign: 'center',
+                  }}
+                >
+                  <span style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>
+                    Reference audio clip required
+                  </span>
+                  <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.4, margin: 0 }}>
+                    Custom Reference Audio mode is selected. Please record or upload your reference speech in Step 2 before generating full speech.
+                  </p>
+                  <Button variant="primary" size="base" onClick={() => setCurrentStep(2)}>
+                    ← Go to Step 2: Voice
+                  </Button>
+                </div>
+              ) : voiceMode === 'reference' && !consent ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 'var(--space-2)',
+                    padding: 'var(--space-3)',
+                    backgroundColor: 'var(--color-surface-muted)',
+                    borderRadius: 'var(--radius-control)',
+                    border: '1px dashed var(--color-warning-border, #f59e0b)',
+                    maxWidth: '460px',
+                    textAlign: 'center',
+                  }}
+                >
+                  <span style={{ fontSize: 'var(--font-base)', fontWeight: 600, color: 'var(--color-warning, #d97706)' }}>
+                    Consent confirmation required
+                  </span>
+                  <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.4, margin: 0 }}>
+                    You must confirm ownership or authorization for voice cloning in Step 2 before synthesizing speech.
+                  </p>
+                  <Button variant="primary" size="base" onClick={() => setCurrentStep(2)}>
+                    Review Consent in Step 2 →
                   </Button>
                 </div>
               ) : (

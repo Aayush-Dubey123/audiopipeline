@@ -513,6 +513,48 @@ def tts_preview(
         )
 
 
+@router.post(
+    "/tts/preview/custom",
+    response_model=TTSPreviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate Custom Reference TTS Preview",
+    description="Generates rapid preview of up to 200 characters conditioned on uploaded reference voice audio.",
+)
+async def tts_preview_custom(
+    http_request: Request,
+    text: str = Form(..., description="Script text (up to 200 characters)"),
+    file: UploadFile = File(..., description="Custom reference voice audio file"),
+    language: str = Form("hi", description="Language code ('hi', 'en', 'mr')"),
+    speed: float = Form(1.0, description="Speech playback rate multiplier"),
+    consent: bool = Form(True, description="Confirmation of voice ownership or authorization"),
+    db: Session = Depends(get_db),
+) -> TTSPreviewResponse:
+    """
+    Handle POST /v1/tts/preview/custom requests.
+    """
+    logging.info("Calling POST /v1/tts/preview/custom endpoint")
+    try:
+        client_key = get_hashed_client_key(http_request)
+        return await JobController.generate_custom_tts_preview(
+            db=db,
+            client_key=client_key,
+            text=text,
+            file=file,
+            language=language,
+            speed=speed,
+            consent=consent,
+        )
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/tts/preview/custom: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/tts/preview/custom: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error during custom TTS preview",
+        )
+
+
 @router.get(
     "/audio/preview/{preview_id}",
     summary="Stream Preview Audio",

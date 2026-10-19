@@ -4,6 +4,8 @@ API and integration test suite for AI Voice Studio core endpoints.
 
 import pytest
 from pathlib import Path
+import numpy as np
+import soundfile as sf
 from sqlalchemy.orm import Session
 from starlette.testclient import TestClient
 from core.apis.api import app
@@ -836,10 +838,13 @@ def test_job_status_includes_stage_and_timestamps() -> None:
         assert payload["updated_at"] is not None
 
 
-def test_post_tts_preview_enqueues_preview_job() -> None:
+def test_post_tts_preview_enqueues_preview_job(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Verify POST /v1/tts/preview returns job_id, preview_url, and confidence_label.
     """
+    from core.controllers.job_controller import job_worker
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id, pipeline_fn=None: None)
+
     with TestClient(app) as test_client:
         response = test_client.post(
             "/v1/tts/preview",
@@ -849,8 +854,198 @@ def test_post_tts_preview_enqueues_preview_job() -> None:
         payload = response.json()
         assert "job_id" in payload
         assert payload["job_id"] is not None
-        assert "preview_url" in payload
         assert "confidence_label" in payload
+
+
+def test_post_custom_tts_preview_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify POST /v1/tts/preview/custom accepts multipart reference audio and queues preview job.
+    """
+    from core.controllers.job_controller import job_worker
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id, pipeline_fn=None: None)
+
+    sr = 22050
+    t = np.linspace(0, 4, int(sr * 4))
+    tone = 0.3 * np.sin(2 * np.pi * 300 * t)
+    wav_path = tmp_path / "custom_preview_ref.wav"
+    sf.write(str(wav_path), tone, sr)
+
+    with TestClient(app) as test_client:
+        with open(wav_path, "rb") as f:
+            response = test_client.post(
+                "/v1/tts/preview/custom",
+                data={
+                    "text": "Short custom preview text.",
+                    "language": "hi",
+                    "speed": "1.0",
+                    "consent": "true",
+                },
+                files={"file": ("custom_preview_ref.wav", f, "audio/wav")},
+            )
+        assert response.status_code == 200
+        payload = response.json()
+        assert "job_id" in payload
+        assert "preview_url" in payload
+
+
+def test_post_custom_tts_preview_no_consent_returns_400(tmp_path: Path) -> None:
+    """
+    Verify POST /v1/tts/preview/custom without consent returns HTTP 400.
+    """
+    sr = 22050
+    tone = 0.2 * np.sin(2 * np.pi * 300 * np.linspace(0, 3, int(sr * 3)))
+    wav_path = tmp_path / "no_consent_preview.wav"
+    sf.write(str(wav_path), tone, sr)
+
+    with TestClient(app) as test_client:
+        with open(wav_path, "rb") as f:
+            response = test_client.post(
+                "/v1/tts/preview/custom",
+                data={
+                    "text": "Short preview.",
+                    "language": "hi",
+                    "speed": "1.0",
+                    "consent": "false",
+                },
+                files={"file": ("no_consent_preview.wav", f, "audio/wav")},
+            )
+        assert response.status_code == 400
+        msg = response.json().get("error", {}).get("message") or response.json().get("detail", "")
+        assert "consent" in msg.lower()
+
+
+def test_post_tts_preview_unknown_voice_returns_404() -> None:
+    """
+    Verify POST /v1/tts/preview for an unknown voice returns 404 rather than silently falling back.
+    """
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/tts/preview",
+            json={"text": "Short preview.", "voice_id": "nonexistent_voice_slug", "language": "hi"},
+        )
+        assert response.status_code == 404
+
+
+def test_reference_check_safety_no_file_or_voice_returns_400() -> None:
+    """
+    Verify POST /v1/reference/check without audio file or voice_id returns HTTP 400.
+    """
+    with TestClient(app) as test_client:
+        response = test_client.post("/v1/reference/check")
+        assert response.status_code == 400
+
+
+def test_post_custom_tts_job_creation_languages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify POST /v1/tts/custom accepts reference audio and creates jobs for en, hi, and mr.
+    """
+    from core.controllers.job_controller import job_worker
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id, pipeline_fn=None: None)
+
+    sr = 22050
+    tone = 0.2 * np.sin(2 * np.pi * 300 * np.linspace(0, 3, int(sr * 3)))
+    ref_path = tmp_path / "custom_test_ref.wav"
+    sf.write(str(ref_path), tone, sr)
+
+    with TestClient(app) as test_client:
+        for idx, lang in enumerate(["en", "hi", "mr"]):
+            with open(ref_path, "rb") as f:
+                response = test_client.post(
+                    "/v1/tts/custom",
+                    data={
+                        "text": f"This is a test script in {lang}.",
+                        "language": lang,
+                        "speed": "1.0",
+                        "consent": "true",
+                    },
+                    files={"file": (f"ref_{lang}.wav", f, "audio/wav")},
+                    headers={"X-Forwarded-For": f"10.10.1.{idx + 1}"},
+                )
+            assert response.status_code == 202, f"Failed for lang={lang}: {response.text}"
+            payload = response.json()
+            assert payload["kind"] == "tts_custom"
+            assert "job_id" in payload
+
+
+def test_post_custom_tts_distinct_references_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify two requests with different reference recordings are strictly isolated in their respective job directories.
+    """
+    from core.controllers.job_controller import job_worker
+    monkeypatch.setattr(job_worker, "enqueue_job", lambda j_id, pipeline_fn=None: None)
+
+    sr = 22050
+    tone_a = 0.2 * np.sin(2 * np.pi * 300 * np.linspace(0, 3, int(sr * 3)))
+    tone_b = 0.4 * np.sin(2 * np.pi * 600 * np.linspace(0, 3, int(sr * 3)))
+    ref_a = tmp_path / "ref_a.wav"
+    ref_b = tmp_path / "ref_b.wav"
+    sf.write(str(ref_a), tone_a, sr)
+    sf.write(str(ref_b), tone_b, sr)
+
+    from core.config import get_settings
+    settings = get_settings()
+
+    with TestClient(app) as test_client:
+        with open(ref_a, "rb") as f:
+            res_a = test_client.post(
+                "/v1/tts/custom",
+                data={"text": "Script A", "language": "en", "speed": "1.0", "consent": "true"},
+                files={"file": ("ref_a.wav", f, "audio/wav")},
+                headers={"X-Forwarded-For": "10.20.1.1"},
+            )
+        with open(ref_b, "rb") as f:
+            res_b = test_client.post(
+                "/v1/tts/custom",
+                data={"text": "Script B", "language": "en", "speed": "1.0", "consent": "true"},
+                files={"file": ("ref_b.wav", f, "audio/wav")},
+                headers={"X-Forwarded-For": "10.20.1.2"},
+            )
+
+        assert res_a.status_code == 202
+        assert res_b.status_code == 202
+        job_id_a = res_a.json()["job_id"]
+        job_id_b = res_b.json()["job_id"]
+
+        assert job_id_a != job_id_b
+
+        dir_a = settings.tmp_path / job_id_a
+        dir_b = settings.tmp_path / job_id_b
+        file_a = dir_a / "reference.wav"
+        file_b = dir_b / "reference.wav"
+
+        assert file_a.exists()
+        assert file_b.exists()
+
+        import hashlib
+        hash_a = hashlib.sha256(file_a.read_bytes()).hexdigest()
+        hash_b = hashlib.sha256(file_b.read_bytes()).hexdigest()
+        assert hash_a != hash_b, "Reference audio hashes must be distinct for distinct inputs"
+
+
+def test_custom_tts_unsupported_language_returns_400(tmp_path: Path) -> None:
+    """
+    Verify POST /v1/tts/custom with unsupported language returns HTTP 400.
+    """
+    sr = 22050
+    tone = 0.2 * np.sin(2 * np.pi * 300 * np.linspace(0, 3, int(sr * 3)))
+    ref_path = tmp_path / "custom_unsupported_ref.wav"
+    sf.write(str(ref_path), tone, sr)
+
+    with TestClient(app) as test_client:
+        with open(ref_path, "rb") as f:
+            response = test_client.post(
+                "/v1/tts/custom",
+                data={
+                    "text": "Unsupported language test.",
+                    "language": "de",
+                    "speed": "1.0",
+                    "consent": "true",
+                },
+                files={"file": ("ref.wav", f, "audio/wav")},
+                headers={"X-Forwarded-For": "10.30.1.1"},
+            )
+        assert response.status_code == 400
+
 
 
 

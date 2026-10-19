@@ -73,7 +73,11 @@ export const HistoryDrawer: React.FC<HistoryDrawerProps> = ({
                         color: 'var(--color-text-primary)',
                       }}
                     >
-                      {job.voice_id || 'Voice'}
+                      {job.kind === 'tts_custom'
+                        ? 'Custom Reference Voice'
+                        : job.kind === 'vc'
+                        ? `Voice Conversion (${job.voice_id || 'RVC'})`
+                        : job.voice_id || 'Studio Voice'}
                     </span>
                     <span
                       style={{

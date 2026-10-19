@@ -192,6 +192,8 @@ class JobWorker:
             logging.info("Stopping JobWorker background thread")
             self._running = False
             self.queue.put((None, None))
+            if hasattr(self, "_thread") and self._thread and self._thread.is_alive():
+                self._thread.join(timeout=2.0)
 
     def enqueue_job(self, job_id: str, pipeline_fn: Optional[Callable] = None) -> None:
         """
@@ -360,6 +362,18 @@ def _run_long_form_tts(
 
     # 1. Enforce disk space safety before creating chunks
     AudioService.check_free_disk_gb(settings.tmp_path, required_gb=1.0)
+
+    # 1b. Verify reference audio and compute content identity hash
+    if not ref_path.exists():
+        logging.error(f"TTS synthesis rejected: reference file does not exist at {ref_path}")
+        raise RuntimeError(f"Reference audio missing or unreadable: {ref_path.name}")
+
+    import hashlib
+    ref_bytes = ref_path.read_bytes()
+    ref_hash = hashlib.sha256(ref_bytes).hexdigest()[:16]
+    logging.info(
+        f"Conditioning TTS job '{job_id}' on reference: hash='{ref_hash}', engine='chatterbox_multilingual', lang='{language}'"
+    )
 
     # 2. Split text into chunks respecting sentence and paragraph boundaries
     chunks, para_boundaries = split_text_with_boundaries(text, max_chars=settings.CHUNK_MAX_CHARS)
@@ -533,6 +547,8 @@ def _run_long_form_tts(
             "chunk_total": chunk_total,
             "ai_generated": True,
             "format_sizes": format_sizes,
+            "ref_hash": ref_hash,
+            "engine": "chatterbox_multilingual",
         }
     except Exception as exc:
         # Keep finished chunks, only purge partial incomplete .part files
@@ -587,6 +603,9 @@ def production_inference_pipeline(
                 raise RuntimeError(f"Voice '{voice_id}' has unsupported model type: {voice.model_type}")
             
             ref_path = (settings.voices_path / voice.asset_file).resolve()
+            if not ref_path.exists():
+                logging.error(f"Voice '{voice_id}' asset file not found on disk: {ref_path}")
+                raise RuntimeError(f"Voice '{voice_id}' asset file missing on disk: {voice.asset_file}")
             from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
             pipeline_service = ChatterboxService()
         finally:
@@ -638,39 +657,37 @@ def production_inference_pipeline(
         text = (payload.get("text") or "")[:200]
         language = payload.get("language", "hi")
         speed = float(payload.get("speed", 1.0))
-        ref_path = None
-
-        db = SessionLocal()
-        try:
-            JobCRUD.update_job_status(
-                db=db,
-                job_id=job_id,
-                status="processing",
-                progress_message="Loading voice model...",
-                stage="Loading voice",
-                stage_index=2,
-                stage_total=4,
-            )
-
-            voice = VoiceCRUD.get_voice_by_id(db, voice_id) if voice_id else None
-            if voice and hasattr(voice, "asset_file") and voice.asset_file:
-                p = (settings.voices_path / voice.asset_file).resolve()
-                if p.exists():
-                    ref_path = p
-        finally:
-            db.close()
-
-        if not ref_path:
-            p = (settings.voices_path / "reference" / "client_ref.wav").resolve()
-            if p.exists():
-                ref_path = p
+        # 1. Custom reference audio uploaded for this specific preview job takes precedence
+        job_ref = job_dir / "reference.wav"
+        if job_ref.exists() and job_ref.stat().st_size > 44:
+            ref_path = job_ref
+        elif voice_id:
+            db = SessionLocal()
+            try:
+                voice = VoiceCRUD.get_voice_by_id(db, voice_id)
+                if not voice:
+                    logging.error(f"Preview voice '{voice_id}' not found in catalog")
+                    raise RuntimeError(f"Voice '{voice_id}' not found in catalog.")
+                if hasattr(voice, "asset_file") and voice.asset_file:
+                    p = (settings.voices_path / voice.asset_file).resolve()
+                    if p.exists():
+                        ref_path = p
+                    else:
+                        logging.error(f"Voice '{voice_id}' asset file missing on disk: {p}")
+                        raise RuntimeError(f"Voice '{voice_id}' asset file not found on disk: {voice.asset_file}")
+            finally:
+                db.close()
 
         if not ref_path or not ref_path.exists():
-            job_ref = job_dir / "reference.wav"
-            if job_ref.exists():
-                ref_path = job_ref
-            else:
-                raise RuntimeError("Reference audio for preview not found.")
+            logging.error(f"Preview job '{job_id}' rejected: no valid reference audio found")
+            raise RuntimeError(f"Reference audio for preview job '{job_id}' not found. Please provide a valid voice or reference recording.")
+
+        import hashlib
+        ref_bytes = ref_path.read_bytes()
+        ref_hash = hashlib.sha256(ref_bytes).hexdigest()[:16]
+        logging.info(
+            f"Conditioning preview job '{job_id}' on reference: hash='{ref_hash}', engine='chatterbox_multilingual', lang='{language}'"
+        )
 
         db = SessionLocal()
         try:
@@ -727,6 +744,8 @@ def production_inference_pipeline(
             "ai_generated": True,
             "confidence_label": "good",
             "text_preview": text,
+            "ref_hash": ref_hash,
+            "engine": "chatterbox_multilingual",
         }
 
     else:

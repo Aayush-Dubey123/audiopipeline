@@ -60,10 +60,17 @@ def synthesize(
     if not clean_text:
         raise RuntimeError("Empty text provided for synthesis.")
 
+    # Map language to supported model language code
+    model_lang = (language or "en").lower().strip()
+    if model_lang == "mr":
+        # Chatterbox Multilingual model supports Devanagari script (shared between Hindi and Marathi)
+        # under the 'hi' acoustic grapheme vocabulary.
+        model_lang = "hi"
+
     # Generate audio waveform
     wav = model.generate(
         text=clean_text,
-        language_id=language,
+        language_id=model_lang,
         audio_prompt_path=None,
         exaggeration=exaggeration,
         cfg_weight=cfg_weight,

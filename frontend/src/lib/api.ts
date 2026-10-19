@@ -266,5 +266,28 @@ export const api = {
     });
     return handleResponse<TTSPreviewResponse>(res);
   },
+
+  /**
+   * Rapidly preview speech synthesis conditioned on custom reference audio (<=200 chars).
+   */
+  async getCustomTTSPreview(params: {
+    text: string;
+    file: File;
+    language?: string;
+    speed?: number;
+    consent?: boolean;
+  }): Promise<TTSPreviewResponse> {
+    const formData = new FormData();
+    formData.append('text', params.text);
+    formData.append('file', params.file);
+    formData.append('language', params.language || 'hi');
+    formData.append('speed', String(params.speed || 1.0));
+    formData.append('consent', String(params.consent ?? true));
+    const res = await fetch(`${API_BASE}/tts/preview/custom`, {
+      method: 'POST',
+      body: formData,
+    });
+    return handleResponse<TTSPreviewResponse>(res);
+  },
 };
 

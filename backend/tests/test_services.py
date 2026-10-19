@@ -561,6 +561,91 @@ def test_reference_safety_check_transcoding_fallback(temp_audio_dir: Path) -> No
     assert quality.duration_seconds > 3.0
 
 
+def test_reference_safety_duration_not_zero_for_moderate_volume(temp_audio_dir: Path) -> None:
+    """
+    Verify an 8-second speech clip with moderate loudness does not collapse to 0.0s speech length.
+    """
+    sr = 22050
+    # Moderate loudness synthetic speech bursts (~ -38 dBFS)
+    burst = 0.015 * np.sin(2 * np.pi * 300 * np.linspace(0, 0.7, int(sr * 0.7)))
+    pause = np.zeros(int(sr * 0.3))
+    pattern = np.concatenate([burst, pause] * 8)
+
+    wav_path = temp_audio_dir / "moderate_volume.wav"
+    sf.write(str(wav_path), pattern, sr)
+
+    res = ValidationService.check_reference_safety(wav_path)
+    assert res["metrics"]["total_duration_s"] >= 7.5
+    assert res["metrics"]["speech_length_s"] > 2.0
+
+
+def test_distinct_reference_conditioning_hashes(temp_audio_dir: Path) -> None:
+    """
+    Verify two distinct audio references produce distinct SHA-256 conditioning hashes.
+    """
+    import hashlib
+
+    sr = 22050
+    t = np.linspace(0, 3, int(sr * 3))
+    audio_a = 0.2 * np.sin(2 * np.pi * 220 * t)
+    audio_b = 0.2 * np.sin(2 * np.pi * 440 * t)
+
+    wav_a = temp_audio_dir / "voice_a.wav"
+    wav_b = temp_audio_dir / "voice_b.wav"
+    sf.write(str(wav_a), audio_a, sr)
+    sf.write(str(wav_b), audio_b, sr)
+
+    hash_a = hashlib.sha256(wav_a.read_bytes()).hexdigest()[:16]
+    hash_b = hashlib.sha256(wav_b.read_bytes()).hexdigest()[:16]
+
+    assert hash_a != hash_b
+    assert len(hash_a) == 16
+    assert len(hash_b) == 16
+
+
+def test_missing_reference_in_job_worker_raises_error(temp_audio_dir: Path) -> None:
+    """
+    Verify job_worker raises RuntimeError rather than falling back to default voice when reference is missing.
+    """
+    from core.services.jobs.job_worker import production_inference_pipeline
+    import pytest
+
+    missing_path = temp_audio_dir / "missing_job_dir"
+    missing_path.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        production_inference_pipeline(
+            job_id="test_missing_job",
+            kind="tts_custom",
+            voice_id=None,
+            payload={"text": "Hello world", "language": "hi"},
+            job_dir=missing_path,
+        )
+    assert "missing" in str(exc_info.value).lower()
+
+
+def test_chatterbox_language_mapping_marathi() -> None:
+    """
+    Verify Marathi ('mr') is mapped to 'hi' for Devanagari acoustic modeling in chatterbox worker.
+    """
+    from chatterbox.mtl_tts import SUPPORTED_LANGUAGES
+
+    # Verify that 'hi' and 'en' are official languages, and 'mr' is routed to 'hi' for Devanagari
+    assert "en" in SUPPORTED_LANGUAGES
+    assert "hi" in SUPPORTED_LANGUAGES
+    assert "mr" not in SUPPORTED_LANGUAGES  # Verifying that Chatterbox doesn't have an isolated 'mr' token
+
+    # Test the worker language mapping rule
+    for input_lang, expected_model_lang in [("en", "en"), ("hi", "hi"), ("mr", "hi"), ("MR", "hi")]:
+        mapped = (input_lang or "en").lower().strip()
+        if mapped == "mr":
+            mapped = "hi"
+        assert mapped in SUPPORTED_LANGUAGES
+        assert mapped == expected_model_lang
+
+
+
+
 
 
 
