@@ -321,3 +321,232 @@ class ValidationService:
             quality_score=score,
             warnings=warnings,
         )
+
+    @classmethod
+    def check_reference_safety(cls, file_path: Path) -> dict:
+        """
+        Comprehensive acoustic safety inspection for reference voice cloning clips.
+
+        Evaluates speech duration, loudness, background noise / SNR, digital clipping,
+        echo / reverb level, speaker consistency (multi-speaker detection), and background music.
+        Returns a 0-100 score, usable flag (hard-blocks unusable audio), and plain advice.
+
+        Args:
+            file_path (Path): Path to the candidate reference audio file.
+
+        Returns:
+            dict: Diagnostic safety evaluation with score, usability, advice, and acoustic metrics.
+        """
+        from scipy import signal
+
+        file_path = Path(file_path)
+        logging.info(f"Executing ValidationService.check_reference_safety on {file_path.name}")
+        meta = AudioService.probe_audio(file_path)
+
+        try:
+            data, sr = sf.read(str(file_path), always_2d=True)
+            mono_data = np.mean(data, axis=1)
+        except Exception as read_err:
+            logging.error(f"Failed to read audio waveform for safety check: {read_err}")
+            raise AudioCorruptError(f"Audio waveform decoding failed: {read_err}")
+
+        total_samples = len(mono_data)
+        if total_samples == 0:
+            return {
+                "score": 0,
+                "is_usable": False,
+                "advice": ["Audio file contains no audible samples."],
+                "metrics": {
+                    "speech_length_s": 0.0,
+                    "total_duration_s": 0.0,
+                    "loudness_dbfs": -99.0,
+                    "snr_db": 0.0,
+                    "clipping_ratio": 0.0,
+                    "echo_reverb": "unknown",
+                    "speaker_consistency": 0.0,
+                    "multi_speaker_detected": False,
+                    "music_detected": False,
+                },
+            }
+
+        total_duration = total_samples / sr
+        peak = float(np.max(np.abs(mono_data)))
+        rms = float(np.sqrt(np.mean(mono_data ** 2) + 1e-10))
+        loudness_dbfs = float(round(20.0 * np.log10(rms + 1e-9), 1))
+
+        # Clipping ratio
+        clipped_samples = int(np.sum(np.abs(mono_data) >= 0.995))
+        clipping_ratio = round(clipped_samples / max(total_samples, 1), 4)
+
+        # Frame energy (25ms window, 10ms hop)
+        w = int(sr * 0.025)
+        hop = int(sr * 0.010)
+        frames = [mono_data[i : i + w] for i in range(0, total_samples - w, hop)]
+        if not frames:
+            return {
+                "score": 0,
+                "is_usable": False,
+                "advice": ["Audio is too short to analyze."],
+                "metrics": {
+                    "speech_length_s": 0.0,
+                    "total_duration_s": round(total_duration, 2),
+                    "loudness_dbfs": loudness_dbfs,
+                    "snr_db": 0.0,
+                    "clipping_ratio": clipping_ratio,
+                    "echo_reverb": "unknown",
+                    "speaker_consistency": 0.0,
+                    "multi_speaker_detected": False,
+                    "music_detected": False,
+                },
+            }
+
+        energies = np.array([np.sqrt(np.mean(f ** 2) + 1e-10) for f in frames])
+        en_db = 20.0 * np.log10(energies + 1e-9)
+        noise_floor = float(np.percentile(en_db, 10))
+        speech_peak = float(np.percentile(en_db, 90))
+        snr_db = round(max(0.0, speech_peak - noise_floor), 1)
+
+        # Speech length
+        speech_thresh = max(noise_floor + 6.0, -45.0)
+        speech_mask = en_db >= speech_thresh
+        speech_frames = int(np.sum(speech_mask))
+        speech_length = round(speech_frames * (hop / sr), 2)
+
+        # Reverb / echo estimate
+        reverb_level = "low"
+        pause_mask = ~speech_mask & (en_db > -55.0)
+        if np.sum(pause_mask) > int(sr * 0.2 / hop):
+            decay_rates = []
+            for i in range(1, len(speech_mask) - 10):
+                if speech_mask[i - 1] and not speech_mask[i]:
+                    drop = en_db[i - 1] - en_db[min(i + 9, len(en_db) - 1)]
+                    decay_rates.append(drop)
+            if decay_rates:
+                med_decay = float(np.median(decay_rates))
+                if med_decay < 9.0:
+                    reverb_level = "high"
+                elif med_decay < 16.0:
+                    reverb_level = "moderate"
+
+        # Multi-speaker detection (spectral consistency across speech chunks)
+        multi_speaker = False
+        speaker_consistency = 1.0
+        speech_indices = np.where(speech_mask)[0]
+        if len(speech_indices) > 60:
+            chunk_size = len(speech_indices) // 3
+            chunks = [speech_indices[k * chunk_size : (k + 1) * chunk_size] for k in range(3)]
+            chunk_specs = []
+            for c in chunks:
+                sig_parts = np.concatenate([frames[idx] for idx in c])
+                if len(sig_parts) > int(sr * 0.1):
+                    _, _, Sxx = signal.spectrogram(sig_parts, fs=sr, nperseg=int(sr * 0.025))
+                    bands = np.array_split(Sxx, 20, axis=0)
+                    feat = np.array([np.mean(np.log(np.mean(b, axis=0) + 1e-10)) for b in bands])
+                    chunk_specs.append(feat)
+            if len(chunk_specs) == 3:
+                sims = []
+                for i in range(len(chunk_specs)):
+                    for j in range(i + 1, len(chunk_specs)):
+                        dot = float(np.dot(chunk_specs[i], chunk_specs[j]))
+                        norm = float(np.linalg.norm(chunk_specs[i]) * np.linalg.norm(chunk_specs[j]) + 1e-9)
+                        sims.append(dot / norm)
+                speaker_consistency = round(float(np.min(sims)), 3)
+                if speaker_consistency < 0.88:
+                    multi_speaker = True
+
+        # Music detection in pause frames
+        music_detected = False
+        if np.sum(pause_mask) > int(sr * 0.5 / hop):
+            pause_samples = np.concatenate([frames[idx] for idx in np.where(pause_mask)[0]])
+            if len(pause_samples) > sr:
+                corr = np.correlate(pause_samples[: sr * 2], pause_samples[: sr * 2], mode="full")
+                mid = len(corr) // 2
+                corr = corr[mid:]
+                corr = corr / (corr[0] + 1e-9)
+                min_lag = int(sr / 800)
+                max_lag = int(sr / 60)
+                if max_lag < len(corr):
+                    max_peak = float(np.max(corr[min_lag:max_lag]))
+                    if max_peak > 0.65:
+                        music_detected = True
+
+        # Score & plain-language advice
+        score = 100
+        advice = []
+        hard_block = False
+
+        if speech_length < 3.0:
+            hard_block = True
+            score -= 45
+            advice.append(f"Hard block: Speech is too short ({speech_length:.1f}s). Provide at least 5 to 15 seconds of speaking.")
+        elif speech_length < 8.0:
+            score -= 15
+            advice.append(f"Warning: Speech duration ({speech_length:.1f}s) is slightly short. 10–25s yields best cloning.")
+        else:
+            advice.append(f"Speech length ({speech_length:.1f}s) is good for voice cloning.")
+
+        if loudness_dbfs < -36.0:
+            hard_block = True
+            score -= 40
+            advice.append(f"Hard block: Audio is too quiet ({loudness_dbfs} dBFS). Speak closer to the microphone.")
+        elif loudness_dbfs < -26.0:
+            score -= 10
+            advice.append(f"Warning: Audio is somewhat quiet ({loudness_dbfs} dBFS). Consider increasing recording volume.")
+        elif loudness_dbfs > -6.0:
+            score -= 10
+            advice.append(f"Warning: Audio is very loud ({loudness_dbfs} dBFS) and close to 0 dBFS.")
+        else:
+            advice.append(f"Loudness level ({loudness_dbfs} dBFS) is optimal.")
+
+        if clipping_ratio > 0.015:
+            hard_block = True
+            score -= 40
+            advice.append(f"Hard block: Severe clipping distortion detected ({clipping_ratio:.1%}). Lower microphone gain.")
+        elif clipping_ratio > 0.002:
+            score -= 15
+            advice.append(f"Warning: Mild clipping detected ({clipping_ratio:.2%}). Slightly reduce input level.")
+
+        if snr_db < 8.0:
+            hard_block = True
+            score -= 40
+            advice.append(f"Hard block: Heavy background noise (SNR {snr_db} dB). Record in a quiet room.")
+        elif snr_db < 16.0:
+            score -= 15
+            advice.append(f"Warning: Moderate background noise (SNR {snr_db} dB). A quieter mic will improve quality.")
+        else:
+            advice.append(f"Background noise level is low (SNR {snr_db} dB).")
+
+        if reverb_level == "high":
+            score -= 15
+            advice.append("Warning: Noticeable room echo or reverb detected. Record in a carpeted room or closer to mic.")
+        elif reverb_level == "moderate":
+            score -= 5
+            advice.append("Slight room ambience detected.")
+
+        if multi_speaker:
+            score -= 25
+            advice.append(f"Warning: Possible multiple speakers or shifting voice detected (consistency: {speaker_consistency:.2f}).")
+
+        if music_detected:
+            score -= 25
+            advice.append("Warning: Background music or melodic tone detected. Clean speech without background music gives best results.")
+
+        score = max(0, min(100, score))
+        is_usable = (not hard_block) and (score >= 40)
+
+        return {
+            "score": score,
+            "is_usable": is_usable,
+            "advice": advice,
+            "metrics": {
+                "speech_length_s": speech_length,
+                "total_duration_s": round(total_duration, 2),
+                "loudness_dbfs": loudness_dbfs,
+                "snr_db": snr_db,
+                "clipping_ratio": clipping_ratio,
+                "echo_reverb": reverb_level,
+                "speaker_consistency": speaker_consistency,
+                "multi_speaker_detected": multi_speaker,
+                "music_detected": music_detected,
+            },
+        }

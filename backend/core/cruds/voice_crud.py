@@ -51,7 +51,7 @@ class VoiceCRUD:
 
         Args:
             db (Session): Active database session.
-            model_type (Optional[str]): Optional model type filter (e.g. openvoice_reference, rvc_model).
+            model_type (Optional[str]): Optional model type filter (e.g. chatterbox_reference).
             include_experimental (bool): Flag whether to include experimental status voices.
 
         Returns:
@@ -147,7 +147,7 @@ class VoiceCRUD:
                 continue
 
             model_type = raw_entry.get("model_type")
-            if model_type not in ("openvoice_reference", "rvc_model"):
+            if model_type != "chatterbox_reference":
                 logging.warning(f"Skipping voice '{voice_id}': invalid model_type '{model_type}'")
                 continue
 
@@ -173,17 +173,13 @@ class VoiceCRUD:
                 logging.warning(f"Skipping voice '{voice_id}': asset file not found at {full_asset}")
                 continue
 
-            if model_type == "openvoice_reference" and full_asset.suffix.lower() not in (
+            if model_type in ("chatterbox_reference", "openvoice_reference") and full_asset.suffix.lower() not in (
                 ".wav",
                 ".ogg",
                 ".flac",
                 ".mp3",
             ):
                 logging.warning(f"Skipping voice '{voice_id}': reference audio has unsupported extension '{full_asset.suffix}'")
-                continue
-
-            if model_type == "rvc_model" and full_asset.suffix.lower() != ".pth":
-                logging.warning(f"Skipping voice '{voice_id}': RVC model checkpoint must end in .pth ('{full_asset.suffix}')")
                 continue
 
             # Validate preview file if present

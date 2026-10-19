@@ -19,7 +19,15 @@
 *.sqlite
 *.sqlite3
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite-journal
+*.sqlite3-journal
 !Thumbs.db
+
+# Operational and lab journals
+JOURNAL.txt
 
 # Python bytecode and caches
 __pycache__/
@@ -96,5 +104,10 @@ backend/voices/rvc_models/
 !backend/voices/reference/client_ref.wav
 !backend/voices/reference/client_ref.txt
 !backend/voices/reference/script.txt
+!backend/voices/previews/client_ref_preview.wav
+
+# Final review independent test artifacts
+final_review/
+
 
 

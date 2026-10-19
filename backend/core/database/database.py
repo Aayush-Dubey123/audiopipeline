@@ -59,6 +59,10 @@ def init_db() -> None:
                     ("chunk_total", "INTEGER"),
                     ("eta_seconds", "INTEGER"),
                     ("completed_at", "DATETIME"),
+                    ("stage", "VARCHAR(64)"),
+                    ("stage_index", "INTEGER"),
+                    ("stage_total", "INTEGER"),
+                    ("started_at", "DATETIME"),
                 ]:
                     if col_name not in existing_cols:
                         conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col_name} {col_type}"))

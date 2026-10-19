@@ -64,3 +64,35 @@ class TextCleanupRequest(BaseModel):
         default="en",
         description="Target language code ('en', 'hi', or 'mr')",
     )
+
+
+class TTSPreviewRequest(BaseModel):
+    """
+    Payload contract for generating a rapid <=200 character voice preview.
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="Script text to preview (truncated to first 200 characters for audio preview)",
+    )
+    voice_id: Optional[str] = Field(
+        default=None,
+        description="Voice ID to preview. If omitted, uses default active reference.",
+    )
+    language: str = Field(
+        default="hi",
+        description="Language code for preview ('hi' or 'en')",
+    )
+    speed: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=2.0,
+        description="Speech rate multiplier",
+    )
+    sync: Optional[bool] = Field(
+        default=False,
+        description="Whether to execute synchronously instead of queuing a background job",
+    )
+

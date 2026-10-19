@@ -154,6 +154,36 @@ class AudioService:
             raise AudioCorruptError(f"Failed to probe audio file: {error}")
 
     @classmethod
+    def read_audio_tags(cls, file_path: Path) -> dict:
+        """
+        Extract metadata tags (ID3 or container tags) from an audio file.
+
+        Args:
+            file_path (Path): Path to the audio file.
+
+        Returns:
+            dict: Dictionary of key-value tags found in format metadata.
+        """
+        cls._check_ffmpeg_tool("ffprobe")
+        if not file_path.exists():
+            return {}
+
+        cmd = [
+            "ffprobe",
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_entries", "format_tags",
+            str(file_path),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
+            data = json.loads(result.stdout)
+            return data.get("format", {}).get("tags", {})
+        except Exception as error:
+            logging.warning(f"Failed to read audio tags from {file_path.name}: {error}")
+            return {}
+
+    @classmethod
     def to_wav(cls, input_path: Path, output_path: Path) -> Path:
         """
         Transcode an arbitrary audio file to standard 16-bit PCM WAV.
@@ -285,14 +315,23 @@ class AudioService:
             raise AudioProcessingError(f"Loudness normalization failed: {error.stderr}")
 
     @classmethod
-    def export_mp3(cls, input_path: Path, output_path: Path, bitrate: str = "192k") -> Path:
+    def export_mp3(
+        cls,
+        input_path: Path,
+        output_path: Path,
+        bitrate: str = "192k",
+        mono: bool = False,
+        label: str = "AI-generated synthetic voice by AI Voice Studio",
+    ) -> Path:
         """
-        Encode an audio file to MP3 format with a target bitrate.
+        Encode an audio file to MP3 format with a target bitrate and ID3 AI tags.
 
         Args:
             input_path (Path): Source audio path.
             output_path (Path): Destination MP3 path.
-            bitrate (str): Target MP3 constant bitrate (e.g., '192k', '128k').
+            bitrate (str): Target MP3 constant bitrate (e.g., '192k', '64k').
+            mono (bool): Whether to downmix to single mono channel.
+            label (str): Attribution message to record in ID3 tags.
 
         Returns:
             Path: Path to the generated MP3 file.
@@ -302,7 +341,9 @@ class AudioService:
             AudioProcessingError: If MP3 encoding fails.
         """
         cls._check_ffmpeg_tool("ffmpeg")
-        logging.info(f"Executing AudioService.export_mp3 at {bitrate} for {input_path.name}")
+        logging.info(
+            f"Executing AudioService.export_mp3 at {bitrate} (mono={mono}) for {input_path.name}"
+        )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -311,16 +352,49 @@ class AudioService:
             "-y",
             "-i", str(input_path),
             "-vn",
-            "-b:a", bitrate,
-            str(output_path),
         ]
+        if mono:
+            cmd.extend(["-ac", "1"])
+        cmd.extend([
+            "-b:a", bitrate,
+            "-id3v2_version", "3",
+            "-metadata", f"comment={label}",
+            "-metadata", f"description={label}",
+            "-metadata", "artist=AI Voice Studio",
+            "-metadata", "publisher=AI Voice Studio",
+            str(output_path),
+        ])
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
             return output_path
         except subprocess.CalledProcessError as error:
             logging.error(f"Error in AudioService.export_mp3: {error.stderr}")
             raise AudioProcessingError(f"MP3 export failed: {error.stderr}")
+
+    @classmethod
+    def export_all_formats(cls, wav_path: Path, job_dir: Path) -> dict:
+        """
+        Encode high-quality MP3 and lightweight WhatsApp-friendly mono MP3 from master WAV.
+
+        Encodes directly from the master WAV without re-synthesis, preserving AI attribution tags.
+
+        Args:
+            wav_path (Path): Master normalized and labeled WAV file.
+            job_dir (Path): Job root directory where output files reside.
+
+        Returns:
+            dict: Mapping of format keys ('wav', 'mp3', 'mp3_small') to byte sizes on disk.
+        """
+        mp3_high = job_dir / "output.mp3"
+        mp3_small = job_dir / "output_small.mp3"
+        cls.export_mp3(wav_path, mp3_high, bitrate="192k", mono=False)
+        cls.export_mp3(wav_path, mp3_small, bitrate="64k", mono=True)
+        return {
+            "wav_bytes": wav_path.stat().st_size if wav_path.is_file() else 0,
+            "mp3_bytes": mp3_high.stat().st_size if mp3_high.is_file() else 0,
+            "mp3_small_bytes": mp3_small.stat().st_size if mp3_small.is_file() else 0,
+        }
 
     @classmethod
     def add_ai_label_metadata(

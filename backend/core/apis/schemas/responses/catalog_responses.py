@@ -59,4 +59,6 @@ class PublicConfigResponse(BaseModel):
     max_audio_seconds: int = Field(default=30, description="Maximum allowed audio duration for conversions")
     max_upload_mb: int = Field(default=10, description="Maximum allowed audio upload file size in megabytes")
     expose_experimental_voices: bool = Field(default=False, description="Whether experimental voices are enabled")
+    seconds_per_audio_second: float = Field(default=0.8, description="Measured seconds of compute per second of audio")
+    compute_seconds_per_audio_second: float = Field(default=0.8, description="Measured seconds of compute per second of audio")
     features: Dict[str, bool] = Field(default_factory=dict, description="Active system capability flags")

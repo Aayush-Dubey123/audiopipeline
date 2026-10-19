@@ -679,3 +679,76 @@ error handling, no secrets, 2-code-files-per-folder. List violations and fix the
 - **Deployment:**
   - Python 3.10-slim base with system FFmpeg, libsndfile1, non-root user `studio` (UID 10000).
   - Data retention: `CleanupService` scheduled job purging expired artifacts (> 60 minutes TTL).
+
+---
+
+### Overnight Autonomous Run Final Report (Phase A, B, C)
+
+#### 1. Candidate Comparison & License Audit Table
+
+| Candidate | Code License | Weights License | Commercial Eligible? | VRAM (GB) | Match% (vs Unseen Real Windows) | CER (%) | Status / Notes |
+|:---|:---|:---|:---:|:---:|:---:|:---:|:---|
+| **Chatterbox Multilingual** | **Apache 2.0** | **Apache 2.0** | **YES** | **2.85 GB** | **84.56% (R0), 80.73% (W1)** | **36.8–46.1%** | **WINNER (Integrated)**: Exceeds 80% target, zero drift, fully commercial. |
+| **OpenVoice V2** | MIT | CC-BY-NC 4.0 | NO (Weights NC) | ~1.80 GB | 56.80% | ~78.5% | Ineligible license; low similarity on Hindi. |
+| **IndicF5 (IIT-M)** | MIT | CC-BY-NC 4.0 | NO (Weights NC) | ~3.20 GB | N/A | 100.0% | Ineligible license; missing phoneme map. |
+| **XTTS-v2 (Coqui)** | CPML Non-Comm | CPML Non-Comm | NO (Non-Commercial) | ~3.50 GB | 81.20% | 18.5% | Ineligible license; benchmark ceiling only. |
+
+#### 2. Selected Architecture & Integration (Phase A5)
+- **Winner:** Chatterbox Multilingual (Resemble AI)
+- **Integration Path:** `backend/core/services/pipelines/chatterbox/` (`chatterbox_service.py`, `chatterbox_worker.py` respecting 2-code-files limit).
+- **Execution Model:** Subprocess worker running in isolated environment `universal_lab/venv_chatterbox`.
+- **Audio Output:** 44.1 kHz 16-bit PCM WAV, loudness normalized to -16.0 LUFS, seamless equal-power joins, AI-attribution metadata injected.
+- **GPU Resource Management:** GPU mutual exclusion via `RVCService.unload_all()` and `OpenVoiceService.unload_all()`.
+
+#### 3. Acceptance Benchmark Metrics (Phase A6 - Full script.txt, 19 Chunks)
+- **Human Baseline Similarity:** 0.8113 (std: 0.0522) across verified non-overlapping speaker windows W1–W6.
+- **Run 1 (R0 `client_ref.wav`, Job `ykAG3t5AxUo_PRoZ6FplIQ`):**
+  - Audio File: `universal_lab/acceptance_R0_full.wav` (29.24 MB, 186.13s duration)
+  - 5-Window Similarity: Min = 0.6725, Mean = 0.6860 -> **Match%: 84.56%** (Target $\ge 80\%$ MET)
+  - First-vs-Last Chunk Drift: **0.0030** (essentially zero conditioning drift across 19 chunks)
+  - Join Quality: 19 seamless joins, max energy delta 60.65 dB at silent boundaries
+  - Whisper CER: 46.06%
+- **Run 2 (W1 Custom Reference, Job `zQOutqaZr4WWiICAi_U5PQ`):**
+  - Audio File: `universal_lab/acceptance_W1_full.wav` (29.18 MB, 196.85s duration)
+  - 5-Window Similarity: Min = 0.6429, Mean = 0.6550 -> **Match%: 80.73%** (Target $\ge 80\%$ MET)
+  - First-vs-Last Chunk Drift: **0.0210** (negligible drift)
+  - Join Quality: 19 seamless joins, max energy delta 71.21 dB
+  - Whisper CER: 36.85%
+- **VRAM Peak:** 2.85 GB (RTX 3050 6GB Laptop GPU)
+- **Total Generation Time:** ~860s (~14.3 minutes for ~5.5 minutes of high-fidelity audio)
+
+#### 4. Limiting Factors & Recording Specifications for Client
+- **Limiting Factors:**
+  1. *Reference Quality:* Original reference audio was extracted from a lossy compressed WhatsApp voice note (`WhatsApp Audio...mpeg`, 16 kHz) with room flutter reflections and background noise.
+  2. *CER Discrepancy:* Zero-shot Devanagari synthesis of untransliterated English proper nouns and silent chunk breaks causes Whisper hallucination on unvoiced frames.
+- **Client Recording Specifications:**
+  - **Duration:** 2 to 3 minutes of continuous speech (minimum 90 seconds voiced, natural pace).
+  - **Script:** Standard Devanagari Hindi text read naturally (avoid mixed Roman script).
+  - **Microphone:** Large-diaphragm cardioid condenser (e.g., Shure SM7B, Rode NT1, or Audio-Technica AT2020) with pop filter, 15 cm distance.
+  - **Room:** Acoustically treated booth or quiet room (no fan, no AC, no flutter echo; noise floor $< -60\text{ dBFS}$).
+  - **Format:** 24-bit or 16-bit uncompressed WAV at 44.1 kHz or 48.0 kHz mono.
+
+#### 5. UI Usability Overhaul (Phase B)
+- **Start Screen:** Rebuilt into two primary goal cards (Text to Voice primary; Voice to Voice dynamically showing "Coming soon" pill when no eligible VC voice is registered).
+- **1-Page Workflow:**
+  1. *Script Editor:* Large text area, live character and word counters, estimated audio length (`~Xm Ys audio`), character limits from `/v1/config/public`.
+  2. *Script Check Tool:* Interactive inspector highlighting Roman words, digits, and timestamps with one-click toggles (digits to Hindi words, strip tags/timestamps, transliterate English to Devanagari) with live Before/After diff and explicit Accept/Reject buttons.
+  3. *Voice Selection & Preview:* Voice cards with audio preview buttons and speed slider.
+- **Progress & Resumption:** Live chunk x of y progress, percentage, ETA, URL persistence (`?tab=tts&job_id=...`), and resumable failed state displaying cached chunks with one-click Resume.
+- **Audio Player:** Waveform seek, speed selector (`[0.75x, 1x, 1.25x, 1.5x, 2x]`), download WAV & MP3, explicit "AI-generated voice" attribution badge (no "C2PA Verified").
+- **Verification:** `tsc -b && vite build` passing with 0 errors in 1.05s; `oxlint` 0 errors.
+
+#### 6. Repo Cleanup Audit (Phase C)
+- **Backup Archive:** `C:\Users\aayus\universal_backup_before_cleanup.zip` (607.85 MB, verified containing all critical anchors).
+- **Pruned Items:** `backend/.venv_lab` (490.85 MB), `frontend/dist` (0.31 MB), `backend/storage/tmp/*` job chunks, all `__pycache__` and `.pytest_cache` directories, compiled `.pyc` files.
+- **Preserved Assets:** RVC/VC code (on hold), `agent.md`, `progress.md`, `README.md`, `voices.json`, `client_ref.wav`, checkpoints. Strict 2-code-files-per-folder maintained.
+- **Repo Size Reduction:**
+  - Pre-cleanup: 1,298.61 MB (18,486 files)
+  - Post-cleanup: 666.48 MB (198 files)
+  - Space Freed: **632.13 MB** (48.7% reduction)
+- **Post-Cleanup Quality Gates:**
+  - Full Backend Test Suite: **61/61 tests passing** in 30.38s.
+  - Frontend Production Build: **0 errors**, built in 1.05s.
+  - Backend Health Check: `/v1/health` 200 OK.
+  - End-to-End Generation: Short Hindi generation completed successfully.
+- **Audit Log:** Saved at `universal_lab/cleanup_log.txt`.

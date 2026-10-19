@@ -11,12 +11,18 @@ from core import logger
 from core.database.database import get_db
 from core.controllers.job_controller import JobController
 from core.apis.middleware import get_hashed_client_key
-from core.apis.schemas.requests.job_requests import TTSJobRequest, TextCleanupRequest
+from core.apis.schemas.requests.job_requests import (
+    TTSJobRequest,
+    TextCleanupRequest,
+    TTSPreviewRequest,
+)
 from core.apis.schemas.responses.job_responses import (
     JobCreatedResponse,
     JobStatusResponse,
     JobDeleteResponse,
     TextCleanupResponse,
+    ReferenceCheckResponse,
+    TTSPreviewResponse,
 )
 
 logging = logger(__name__)
@@ -309,7 +315,7 @@ def resume_job(
 )
 def get_audio_output(
     job_id: str,
-    format: Optional[str] = Query("wav", description="Audio format ('wav' or 'mp3')"),
+    format: Optional[str] = Query("wav", description="Audio format ('wav', 'mp3', or 'mp3_small')"),
     db: Session = Depends(get_db),
 ) -> FileResponse:
     """
@@ -317,7 +323,7 @@ def get_audio_output(
 
     Args:
         job_id (str): Unique job token identifier.
-        format (Optional[str]): Desired audio format ('wav' or 'mp3').
+        format (Optional[str]): Desired audio format ('wav', 'mp3', or 'mp3_small').
         db (Session): Database session dependency.
 
     Returns:
@@ -435,3 +441,103 @@ def delete_job(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
         )
+
+
+@router.post(
+    "/reference/check",
+    response_model=ReferenceCheckResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Check Reference Audio Safety",
+    description="Analyzes reference audio acoustic safety (speech length, loudness, noise, clipping, reverb, speaker, music).",
+)
+async def check_reference(
+    http_request: Request,
+    file: Optional[UploadFile] = File(None),
+    voice_id: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+) -> ReferenceCheckResponse:
+    """
+    Handle POST /v1/reference/check requests.
+    """
+    logging.info("Calling POST /v1/reference/check endpoint")
+    try:
+        client_key = get_hashed_client_key(http_request)
+        return await JobController.check_reference_safety(
+            db=db,
+            client_key=client_key,
+            file=file,
+            voice_id=voice_id,
+        )
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/reference/check: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/reference/check: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error during reference check",
+        )
+
+
+@router.post(
+    "/tts/preview",
+    response_model=TTSPreviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate TTS Preview",
+    description="Generates rapid preview of up to 200 characters with the chosen reference voice.",
+)
+def tts_preview(
+    request: TTSPreviewRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+) -> TTSPreviewResponse:
+    """
+    Handle POST /v1/tts/preview requests.
+    """
+    logging.info("Calling POST /v1/tts/preview endpoint")
+    try:
+        client_key = get_hashed_client_key(http_request)
+        return JobController.generate_tts_preview(
+            db=db,
+            client_key=client_key,
+            request=request,
+        )
+    except HTTPException as httperror:
+        logging.error(f"Error in POST /v1/tts/preview: {httperror}")
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error in POST /v1/tts/preview: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error during TTS preview",
+        )
+
+
+@router.get(
+    "/audio/preview/{preview_id}",
+    summary="Stream Preview Audio",
+    description="Streams generated preview audio WAV file.",
+)
+def get_preview_audio(
+    preview_id: str,
+) -> FileResponse:
+    """
+    Handle GET /v1/audio/preview/{preview_id} requests.
+    """
+    logging.info(f"Calling GET /v1/audio/preview/{preview_id} endpoint")
+    try:
+        file_path = JobController.get_preview_file(preview_id)
+        return FileResponse(
+            path=file_path,
+            media_type="audio/wav",
+            filename=f"preview_{preview_id}.wav",
+        )
+    except HTTPException as httperror:
+        raise httperror
+    except Exception as error:
+        logging.error(f"Error streaming preview audio: {error}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+

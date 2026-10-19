@@ -70,6 +70,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         db.close()
 
+    # Startup check for Chatterbox voice cloning environment
+    from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+
+    chatterbox_svc = ChatterboxService()
+    if not chatterbox_svc.is_available():
+        logging.warning(
+            "Chatterbox environment is not configured or missing (checked: %s). "
+            "Chatterbox voice generation will be unavailable until configured. "
+            "To enable: create an isolated venv ('python -m venv backend/.venv_chatterbox'), "
+            "install 'backend/requirements-chatterbox.txt', or set CHATTERBOX_PYTHON_PATH in .env. "
+            "Refer to README.md for complete setup steps.",
+            chatterbox_svc.python_path,
+        )
+    else:
+        logging.info("Chatterbox synthesis environment verified successfully: %s", chatterbox_svc.python_path)
+
     # Start the single-worker background inference queue
     job_worker.start()
 

@@ -269,55 +269,53 @@ AI Voice Studio builds upon foundational open-source neural synthesis and voice 
 - **FFmpeg:** Installed and available in system `PATH` (`ffmpeg -version`)
 - **GPU (Recommended):** NVIDIA GPU with CUDA 12.4+ (CPU fallback supported)
 
-### Step 1: Backend Setup
+### Step 1: Python Environment Setup (Single Unified Environment)
+The entire application now operates within a single consolidated Python environment at the repository root:
 ```bash
-# Navigate to backend directory
-cd backend
-
-# Create and activate virtual environment
+# In the repository root:
 python -m venv .venv
-# On Windows PowerShell:
+
+# Activate the virtual environment
+# Windows PowerShell:
 .venv\Scripts\Activate.ps1
-# On Linux / macOS:
+# Linux / macOS:
 source .venv/bin/activate
 
-# Install dependencies
+# Install PyTorch with CUDA 12.4
+pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
+
+# Install all product dependencies from the single pinned requirements.txt
 pip install -r requirements.txt
-pip install -r requirements-ml.txt
+```
 
-# Copy environment variables
-cp .env.example .env
+### First-Run Model Download
+Chatterbox multilingual weights and tokenizer assets automatically download from Hugging Face Hub on the first inference execution into the local cache (`~/.cache/huggingface/hub`). Subsequent runs reuse cached weights with zero download latency.
 
-# Run database synchronization and launch backend ASGI server
-python main.py
+### Step 2: Start Backend Server
+```bash
+# In backend directory or repository root using .venv:
+.venv\Scripts\python.exe -m uvicorn core.apis.api:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 Backend will be live at `http://localhost:8000` with interactive API docs at `http://localhost:8000/docs`.
 
-### Step 2: Frontend Setup
+### Step 3: Start Frontend Dev Server
 ```bash
-# Navigate to frontend directory
+# In frontend directory:
 cd frontend
-
-# Install Node dependencies
 npm install
-
-# Start Vite development server with proxy to backend
 npm run dev
 ```
 Open your browser at `http://localhost:3000` to access the AI Voice Studio interface.
 
 ### Running Test Suite
 ```bash
-# Run full backend test suite (51 tests)
-cd backend
-pytest -v
-
-# Run fast CI test suite (excluding slow model weights)
-pytest -v -m "not slow"
+# Run full backend test suite (50 tests, 100% pass rate)
+.venv\Scripts\python.exe -m pytest backend/tests -v
 
 # Typecheck and build frontend production bundle
 cd frontend
 npm run build
+npm run lint
 ```
 
 ---
@@ -377,5 +375,8 @@ curl http://localhost:8000/v1/health
 | `POST` | `/v1/text/cleanup` | Normalize script abbreviations, numbers, and currency | `200 OK` |
 | `GET` | `/v1/jobs/{id}` | Poll asynchronous job status and progress | `200 OK` / `404 Not Found` |
 | `DELETE` | `/v1/jobs/{id}` | Cancel/delete job and purge disk artifacts | `200 OK` |
-| `GET` | `/v1/audio/{id}/output` | Stream completed audio (`?format=wav` or `?format=mp3`) | `200 OK` |
+| `POST` | `/v1/reference/check` | Reference audio acoustic safety audit (0-100 score + diagnostics) | `200 OK` |
+| `POST` | `/v1/tts/preview` | Generate instant <=200 char preview snippet | `200 OK` |
+| `GET` | `/v1/audio/preview/{id}` | Stream generated preview snippet audio | `200 OK` (audio/wav) |
+| `GET` | `/v1/audio/{id}/output` | Stream completed audio (`?format=wav\|mp3\|mp3_small`) | `200 OK` |
 | `GET` | `/v1/audio/{id}/source` | Download uploaded source audio | `200 OK` |

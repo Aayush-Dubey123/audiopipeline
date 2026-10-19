@@ -11,6 +11,8 @@ import type {
   JobCreatedResponse,
   JobStatusResponse,
   TextCleanupResponse,
+  ReferenceCheckResponse,
+  TTSPreviewResponse,
 } from './types';
 
 const API_BASE = '/v1';
@@ -222,4 +224,47 @@ export const api = {
 
     throw new ApiError('Job polling timed out before generation completed.', 'TIMEOUT', 408);
   },
+
+  /**
+   * Check acoustic safety of reference audio (score 0-100, warnings, advice).
+   */
+  async checkReferenceAudio(params?: { file?: File; voiceId?: string }): Promise<ReferenceCheckResponse> {
+    const formData = new FormData();
+    if (params?.file) {
+      formData.append('file', params.file);
+    }
+    if (params?.voiceId) {
+      formData.append('voice_id', params.voiceId);
+    }
+    const res = await fetch(`${API_BASE}/reference/check`, {
+      method: 'POST',
+      body: formData,
+    });
+    return handleResponse<ReferenceCheckResponse>(res);
+  },
+
+  /**
+   * Rapidly preview speech synthesis (<=200 chars).
+   */
+  async getTTSPreview(params: {
+    text: string;
+    voiceId?: string;
+    language?: string;
+    speed?: number;
+    sync?: boolean;
+  }): Promise<TTSPreviewResponse> {
+    const res = await fetch(`${API_BASE}/tts/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: params.text,
+        voice_id: params.voiceId,
+        language: params.language || 'hi',
+        speed: params.speed || 1.0,
+        sync: params.sync ?? false,
+      }),
+    });
+    return handleResponse<TTSPreviewResponse>(res);
+  },
 };
+

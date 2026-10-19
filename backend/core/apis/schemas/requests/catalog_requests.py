@@ -15,5 +15,5 @@ class VoiceFilterParams(BaseModel):
 
     model_type: Optional[str] = Field(
         default=None,
-        description="Filter voices by pipeline type ('openvoice_reference' or 'rvc_model')",
+        description="Filter voices by pipeline type ('chatterbox_reference')",
     )

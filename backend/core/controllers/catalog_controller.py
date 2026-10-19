@@ -216,9 +216,11 @@ class CatalogController:
             max_audio_seconds=30,
             max_upload_mb=10,
             expose_experimental_voices=settings.EXPOSE_EXPERIMENTAL_VOICES,
+            seconds_per_audio_second=0.8,
+            compute_seconds_per_audio_second=0.8,
             features={
-                "openvoice": True,
-                "rvc": True,
+                "chatterbox": True,
+                "voice_to_voice": False,
                 "llm_cleanup": False,
             },
         )

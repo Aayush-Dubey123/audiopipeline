@@ -9,7 +9,7 @@
       "en",
       "mr"
     ],
-    "model_type": "openvoice_reference",
+    "model_type": "chatterbox_reference",
     "preview_file": "previews/client_ref_preview.wav",
     "asset_file": "reference/client_ref.wav",
     "license": "Client-provided reference. Written permission from the speaker required before delivery.",

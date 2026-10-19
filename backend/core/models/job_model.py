@@ -33,7 +33,10 @@ class JobModel(Base):
     payload = Column(JSON, nullable=True, doc="Job input configuration and sanitized parameters")
     output_metadata = Column(JSON, nullable=True, doc="Generated audio duration, format, and size metadata")
 
-    # Long-form chunk progress fields (null for short / VC jobs)
+    # Long-form chunk and stage progress fields
+    stage = Column(String(64), nullable=True, doc="Current execution stage: Queued, Loading voice, Generating speech, Polishing audio, Completed")
+    stage_index = Column(Integer, nullable=True, doc="1-based current stage index")
+    stage_total = Column(Integer, nullable=True, doc="Total pipeline stage count")
     chunk_done = Column(Integer, nullable=True, doc="Number of synthesis chunks completed so far")
     chunk_total = Column(Integer, nullable=True, doc="Total number of synthesis chunks in this job")
     eta_seconds = Column(Integer, nullable=True, doc="Rolling ETA in seconds based on average chunk wall time")
@@ -43,6 +46,11 @@ class JobModel(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
         doc="Timestamp when job was created",
+    )
+    started_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc="Timestamp when job execution processing began",
     )
     updated_at = Column(
         DateTime(timezone=True),

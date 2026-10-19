@@ -23,6 +23,104 @@ from core.services.jobs.cleanup_service import CleanupService
 logging = logger(__name__)
 settings = get_settings()
 
+import re
+from typing import List, Tuple, Set
+
+# Abbreviations that must NOT be treated as sentence-ending periods.
+_ABBREVIATIONS = {
+    "dr", "mr", "mrs", "ms", "prof", "sr", "jr", "vs", "etc",
+    "ie", "eg", "approx", "dept", "est", "govt", "inc", "ltd", "no",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    "st", "ave", "blvd",
+}
+_SENT_END = re.compile(r"[.!?।॥]+(?=\s|$)")
+
+
+def _is_abbreviation(word: str) -> bool:
+    return word.lower().rstrip(".") in _ABBREVIATIONS
+
+
+def split_text_with_boundaries(text: str, max_chars: int = 1000) -> Tuple[List[str], Set[int]]:
+    if not text or not text.strip():
+        return [], set()
+
+    chunks: List[str] = []
+    paragraph_start_indices = set()
+    paragraphs = re.split(r"\n{2,}", text)
+
+    def flush(buf: str) -> List[str]:
+        results: List[str] = []
+        while len(buf) > max_chars:
+            cut = max_chars
+            for pat in (r"[,;]\s", r"\s"):
+                m = None
+                for match in re.finditer(pat, buf[:max_chars]):
+                    m = match
+                if m:
+                    cut = m.end()
+                    break
+            results.append(buf[:cut].strip())
+            buf = buf[cut:].lstrip()
+        if buf.strip():
+            results.append(buf.strip())
+        return results
+
+    for para_idx, para in enumerate(paragraphs):
+        para = para.strip()
+        if not para:
+            continue
+
+        start_chunk_idx = len(chunks)
+        if para_idx > 0 and start_chunk_idx > 0:
+            paragraph_start_indices.add(start_chunk_idx)
+
+        positions: List[int] = []
+        for m in _SENT_END.finditer(para):
+            end = m.end()
+            before = para[:m.start()].rstrip()
+            last_word = re.split(r"\s", before)[-1] if before else ""
+            after_char = para[end:end + 1] if end < len(para) else ""
+            if after_char.isdigit():
+                continue
+            if _is_abbreviation(last_word):
+                continue
+            positions.append(end)
+
+        segments: List[str] = []
+        prev = 0
+        for pos in positions:
+            seg = para[prev:pos].strip()
+            if seg:
+                segments.append(seg)
+            prev = pos
+        tail = para[prev:].strip()
+        if tail:
+            segments.append(tail)
+
+        if not segments:
+            segments = [para]
+
+        current = ""
+        for seg in segments:
+            if len(seg) > max_chars:
+                if current.strip():
+                    chunks.extend(flush(current.strip()))
+                    current = ""
+                chunks.extend(flush(seg))
+                continue
+
+            if current and len(current) + 1 + len(seg) > max_chars:
+                chunks.extend(flush(current.strip()))
+                current = seg
+            else:
+                current = (current + " " + seg).lstrip() if current else seg
+
+        if current.strip():
+            chunks.extend(flush(current.strip()))
+
+    final_chunks = [c for c in chunks if c.strip()]
+    return final_chunks, paragraph_start_indices
+
 
 class QueueFullError(Exception):
     """
@@ -154,11 +252,16 @@ class JobWorker:
                 logging.warning(f"Skipping job '{job_id}': state is not queued (status={getattr(job, 'status', None)})")
                 return
 
+            started_at = datetime.now(timezone.utc)
             JobCRUD.update_job_status(
                 db=db,
                 job_id=job_id,
                 status="processing",
-                progress_message="Starting inference generation...",
+                progress_message="Loading voice model...",
+                stage="Loading voice",
+                stage_index=2,
+                stage_total=4,
+                started_at=started_at,
             )
 
             job_dir = (settings.tmp_path / job_id).resolve()
@@ -201,6 +304,9 @@ class JobWorker:
                 status="completed",
                 progress_message="Inference completed successfully.",
                 output_metadata=metadata if isinstance(metadata, dict) else {},
+                stage="Completed",
+                stage_index=4,
+                stage_total=4,
             )
             logging.info(f"Job '{job_id}' completed successfully")
 
@@ -226,6 +332,7 @@ def _run_long_form_tts(
     speed: float,
     language: str,
     job_dir: Path,
+    pipeline_service: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Execute chunked long-form text-to-speech synthesis with pause stitching and progress updates.
@@ -238,6 +345,7 @@ def _run_long_form_tts(
         speed (float): Playback speed multiplier.
         language (str): Target language ('en', 'hi', 'mr').
         job_dir (Path): Working directory for chunk temporary files.
+        pipeline_service (Optional[Any]): Optional dedicated synthesis pipeline service instance.
 
     Returns:
         Dict[str, Any]: Generated audio metadata.
@@ -246,7 +354,6 @@ def _run_long_form_tts(
         RuntimeError: If disk space is insufficient, reference audio is missing, or generation fails.
         TimeoutError: If execution exceeds chunk or job timeouts.
     """
-    from core.services.pipelines.openvoice_service import OpenVoiceService, split_text_with_boundaries
     from core.services.audio.audio_service import AudioService
     from core.database.database import SessionLocal
     import shutil
@@ -264,7 +371,9 @@ def _run_long_form_tts(
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     # Clean up any leftover incomplete .part files from prior interrupted attempts
-    for stale_part in chunks_dir.glob("*.part"):
+    for stale_part in chunks_dir.glob("*_part.wav"):
+        stale_part.unlink(missing_ok=True)
+    for stale_part in chunks_dir.glob("*.part*"):
         stale_part.unlink(missing_ok=True)
 
     # Check for already completed chunks
@@ -274,7 +383,6 @@ def _run_long_form_tts(
         if (chunks_dir / f"chunk_{i:04d}.wav").exists() and (chunks_dir / f"chunk_{i:04d}.wav").stat().st_size > 44
     ]
     is_resumed = len(existing_finished) > 0
-    force_recompute_se = is_resumed  # Recompute speaker embedding on resume
 
     # 3. Publish initial progress
     db = SessionLocal()
@@ -289,10 +397,14 @@ def _run_long_form_tts(
     finally:
         db.close()
 
-    service = OpenVoiceService()
+    if pipeline_service is not None:
+        service = pipeline_service
+    else:
+        from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+        service = ChatterboxService()
     chunk_paths = []
     job_start_time = time.perf_counter()
-    sample_rate = 22050
+    sample_rate = 44100 if "chatterbox" in type(service).__name__.lower() else 22050
 
     try:
         for idx, chunk_text in enumerate(chunks):
@@ -301,7 +413,7 @@ def _run_long_form_tts(
                 raise TimeoutError(f"Job exceeded overall timeout limit of {settings.JOB_MAX_SECONDS} seconds.")
 
             chunk_out = chunks_dir / f"chunk_{idx:04d}.wav"
-            chunk_part = chunks_dir / f"chunk_{idx:04d}.wav.part"
+            chunk_part = chunks_dir / f"chunk_{idx:04d}_part.wav"
 
             # Skip already finished chunk
             if chunk_out.exists() and chunk_out.stat().st_size > 44:
@@ -319,14 +431,23 @@ def _run_long_form_tts(
             chunk_lang = "hi" if any("\u0900" <= c <= "\u097F" for c in chunk_text) else language
 
             # Synthesize chunk to .part file
-            res = service.generate(
-                text=chunk_text,
-                reference_audio_path=str(ref_path),
-                output_path=str(chunk_part),
-                speed=speed,
-                language=chunk_lang,
-                force_recompute_se=force_recompute_se,
-            )
+            if hasattr(service, "generate") and "force_recompute_se" in getattr(service.generate, "__code__", object()).co_varnames:
+                res = service.generate(
+                    text=chunk_text,
+                    reference_audio_path=str(ref_path),
+                    output_path=str(chunk_part),
+                    speed=speed,
+                    language=chunk_lang,
+                    force_recompute_se=force_recompute_se,
+                )
+            else:
+                res = service.generate(
+                    text=chunk_text,
+                    reference_audio_path=str(ref_path),
+                    output_path=str(chunk_part),
+                    speed=speed,
+                    language=chunk_lang,
+                )
             force_recompute_se = False
 
             # Atomically rename .part to final chunk .wav
@@ -344,7 +465,7 @@ def _run_long_form_tts(
                 )
 
             chunk_paths.append(chunk_out)
-            sample_rate = res.sample_rate
+            sample_rate = getattr(res, "sample_rate", sample_rate) or sample_rate
 
             # Calculate rolling ETA
             chunk_done = idx + 1
@@ -366,6 +487,20 @@ def _run_long_form_tts(
                 db.close()
 
         # 4. Join chunks or copy single chunk
+        db = SessionLocal()
+        try:
+            JobCRUD.update_job_status(
+                db=db,
+                job_id=job_id,
+                status="processing",
+                progress_message="Polishing audio and exporting formats...",
+                stage="Polishing audio",
+                stage_index=4,
+                stage_total=4,
+            )
+        finally:
+            db.close()
+
         if chunk_total == 1:
             shutil.copyfile(str(chunk_paths[0]), str(out_wav))
         else:
@@ -378,10 +513,19 @@ def _run_long_form_tts(
                 sample_rate=sample_rate,
             )
 
+        # Single post-join loudness normalization
+        try:
+            AudioService.normalize_loudness(out_wav, out_wav)
+        except Exception as norm_err:
+            logging.warning(f"Loudness normalization skipped or failed: {norm_err}")
+
         # 5. Add synthetic AI attribution metadata
         AudioService.add_ai_label_metadata(out_wav)
 
-        # 6. Purge intermediate chunks ONLY after successful join
+        # 6. Pre-encode MP3 formats (192k high quality + 64k mono WhatsApp-friendly) from master WAV
+        format_sizes = AudioService.export_all_formats(out_wav, job_dir)
+
+        # 7. Purge intermediate chunks ONLY after successful join
         shutil.rmtree(chunks_dir, ignore_errors=True)
 
         final_meta = AudioService.probe_audio(out_wav)
@@ -392,11 +536,14 @@ def _run_long_form_tts(
             "language": language,
             "chunk_total": chunk_total,
             "ai_generated": True,
+            "format_sizes": format_sizes,
         }
     except Exception as exc:
         # Keep finished chunks, only purge partial incomplete .part files
         if chunks_dir.exists():
-            for p in chunks_dir.glob("*.part"):
+            for p in chunks_dir.glob("*_part.wav"):
+                p.unlink(missing_ok=True)
+            for p in chunks_dir.glob("*.part*"):
                 p.unlink(missing_ok=True)
         raise exc
 
@@ -409,11 +556,11 @@ def production_inference_pipeline(
     job_dir: Path,
 ) -> Dict[str, Any]:
     """
-    Standard production inference pipeline dispatching to OpenVoice or RVC.
+    Standard production inference pipeline dispatching to Chatterbox TTS.
 
     Args:
         job_id (str): Unique job identifier token.
-        kind (str): Pipeline type ('tts', 'tts_custom', or 'vc').
+        kind (str): Pipeline type ('tts' or 'tts_custom').
         voice_id (Optional[str]): Registered voice identifier slug.
         payload (Dict[str, Any]): Job-specific parameters (text, language, speed, pitch_shift).
         job_dir (Path): Dedicated temporary execution directory for this job.
@@ -440,10 +587,12 @@ def production_inference_pipeline(
             voice = VoiceCRUD.get_voice_by_id(db, voice_id) if voice_id else None
             if not voice:
                 raise RuntimeError(f"Voice '{voice_id}' not found in catalog.")
-            if voice.model_type != "openvoice_reference":
-                raise RuntimeError(f"Voice '{voice_id}' is not an OpenVoice reference model.")
+            if voice.model_type != "chatterbox_reference":
+                raise RuntimeError(f"Voice '{voice_id}' has unsupported model type: {voice.model_type}")
             
             ref_path = (settings.voices_path / voice.asset_file).resolve()
+            from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+            pipeline_service = ChatterboxService()
         finally:
             db.close()
 
@@ -455,17 +604,21 @@ def production_inference_pipeline(
             speed=speed,
             language=language,
             job_dir=job_dir,
+            pipeline_service=pipeline_service,
         )
 
     elif kind == "tts_custom":
         text = payload.get("text", "")
-        language = payload.get("language", "en")
+        language = payload.get("language", "hi")
         speed = float(payload.get("speed", 1.0))
         ref_path = job_dir / "reference.wav"
 
         if not ref_path.exists():
             raise RuntimeError("Reference audio file missing in custom TTS job directory.")
 
+        from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+        pipeline_service = ChatterboxService()
+
         return _run_long_form_tts(
             job_id=job_id,
             text=text,
@@ -474,46 +627,110 @@ def production_inference_pipeline(
             speed=speed,
             language=language,
             job_dir=job_dir,
+            pipeline_service=pipeline_service,
         )
 
     elif kind == "vc":
-        from core.services.pipelines.rvc_service import RVCService
-        from core.services.audio.audio_service import AudioService
+        raise RuntimeError("Voice-to-voice conversion is currently disabled (coming soon).")
+
+    elif kind in ("preview", "tts_preview"):
         from core.cruds.voice_crud import VoiceCRUD
         from core.database.database import SessionLocal
+        from core.services.audio.audio_service import AudioService
+        import shutil
 
-        pitch_shift = int(payload.get("pitch_shift", 0))
-        src_path = job_dir / "source.wav"
-        if not src_path.exists():
-            raise RuntimeError("Source audio file missing in VC job directory.")
+        text = (payload.get("text") or "")[:200]
+        language = payload.get("language", "hi")
+        speed = float(payload.get("speed", 1.0))
+        ref_path = None
 
         db = SessionLocal()
         try:
+            JobCRUD.update_job_status(
+                db=db,
+                job_id=job_id,
+                status="processing",
+                progress_message="Loading voice model...",
+                stage="Loading voice",
+                stage_index=2,
+                stage_total=4,
+            )
+
             voice = VoiceCRUD.get_voice_by_id(db, voice_id) if voice_id else None
-            if not voice:
-                raise RuntimeError(f"Voice '{voice_id}' not found in catalog.")
-            if voice.model_type != "rvc_model":
-                raise RuntimeError(f"Voice '{voice_id}' is not an RVC model.")
-            
-            model_path = (settings.voices_path / voice.asset_file).resolve()
+            if voice and hasattr(voice, "asset_file") and voice.asset_file:
+                p = (settings.voices_path / voice.asset_file).resolve()
+                if p.exists():
+                    ref_path = p
         finally:
             db.close()
 
-        service = RVCService()
-        rvc_res = service.convert(
-            source_audio_path=str(src_path),
-            voice_model_path=str(model_path),
+        if not ref_path:
+            p = (settings.voices_path / "reference" / "client_ref.wav").resolve()
+            if p.exists():
+                ref_path = p
+
+        if not ref_path or not ref_path.exists():
+            job_ref = job_dir / "reference.wav"
+            if job_ref.exists():
+                ref_path = job_ref
+            else:
+                raise RuntimeError("Reference audio for preview not found.")
+
+        db = SessionLocal()
+        try:
+            JobCRUD.update_job_status(
+                db=db,
+                job_id=job_id,
+                status="processing",
+                progress_message="Generating preview speech...",
+                stage="Generating speech",
+                stage_index=3,
+                stage_total=4,
+            )
+        finally:
+            db.close()
+
+        from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+        pipeline_service = ChatterboxService()
+
+        pipeline_service.generate(
+            text=text,
+            reference_audio_path=str(ref_path),
             output_path=str(out_wav),
-            pitch_shift=pitch_shift,
+            speed=speed,
+            language=language,
         )
+
+        db = SessionLocal()
+        try:
+            JobCRUD.update_job_status(
+                db=db,
+                job_id=job_id,
+                status="processing",
+                progress_message="Polishing audio...",
+                stage="Polishing audio",
+                stage_index=4,
+                stage_total=4,
+            )
+        finally:
+            db.close()
+
+        AudioService.normalize_loudness(out_wav, out_wav)
         AudioService.add_ai_label_metadata(out_wav)
+        meta = AudioService.probe_audio(out_wav)
+
+        preview_wav = job_dir / "preview.wav"
+        if not preview_wav.exists() and out_wav.exists():
+            shutil.copyfile(str(out_wav), str(preview_wav))
 
         return {
             "format": "wav",
-            "duration_seconds": rvc_res.duration_seconds,
-            "sample_rate": rvc_res.sample_rate,
-            "pitch_shift": pitch_shift,
+            "duration_seconds": round(meta.duration_seconds, 2),
+            "sample_rate": meta.sample_rate,
+            "language": language,
             "ai_generated": True,
+            "confidence_label": "good",
+            "text_preview": text,
         }
 
     else:

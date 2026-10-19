@@ -78,6 +78,11 @@ class JobCRUD:
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
         output_metadata: Optional[dict] = None,
+        stage: Optional[str] = None,
+        stage_index: Optional[int] = None,
+        stage_total: Optional[int] = None,
+        started_at: Optional[datetime] = None,
+        eta_seconds: Optional[int] = None,
     ) -> Optional[JobModel]:
         """
         Update execution status and state transitions for a job.
@@ -94,6 +99,11 @@ class JobCRUD:
             error_code (Optional[str]): Error code if status is failed.
             error_message (Optional[str]): Error message if status is failed.
             output_metadata (Optional[dict]): Output metrics if completed.
+            stage (Optional[str]): Pipeline stage name.
+            stage_index (Optional[int]): 1-based index of stage.
+            stage_total (Optional[int]): Total stages count.
+            started_at (Optional[datetime]): Timestamp when processing started.
+            eta_seconds (Optional[int]): Rolling ETA seconds.
 
         Returns:
             Optional[JobModel]: Updated job record or None if not found.
@@ -116,6 +126,16 @@ class JobCRUD:
                 job.error_message = error_message
             if output_metadata is not None:
                 job.output_metadata = output_metadata
+            if stage is not None:
+                job.stage = stage
+            if stage_index is not None:
+                job.stage_index = stage_index
+            if stage_total is not None:
+                job.stage_total = stage_total
+            if started_at is not None:
+                job.started_at = started_at
+            if eta_seconds is not None:
+                job.eta_seconds = eta_seconds
 
             # Reset error and completion state if requeued / resumed
             if status == "queued":
@@ -127,6 +147,9 @@ class JobCRUD:
             if status in ("completed", "failed") and job.completed_at is None:
                 job.completed_at = now
                 job.expires_at = now + timedelta(minutes=_settings.JOB_TTL_MINUTES)
+                if status == "completed":
+                    job.stage = "Completed"
+                    job.stage_index = job.stage_total or 4
 
             db.commit()
             db.refresh(job)
@@ -282,6 +305,9 @@ class JobCRUD:
                     chunk_done=chunk_done,
                     chunk_total=chunk_total,
                     eta_seconds=eta_seconds,
+                    stage="Generating speech",
+                    stage_index=3,
+                    stage_total=4,
                     updated_at=datetime.now(timezone.utc),
                     progress_message=(
                         f"Synthesising chunk {chunk_done} of {chunk_total}"

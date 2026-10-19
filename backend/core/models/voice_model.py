@@ -1,7 +1,7 @@
 """
 Voice model entity representing registered AI voice profiles.
 
-Defines persistence schema for OpenVoice reference and RVC voice models.
+Defines persistence schema for Chatterbox reference voice models.
 """
 
 from datetime import datetime, timezone
@@ -21,7 +21,7 @@ class VoiceModel(Base):
     description = Column(Text, nullable=True, doc="Detailed description of voice characteristics")
     style = Column(String(64), nullable=True, doc="Voice delivery style or genre")
     languages = Column(JSON, nullable=False, default=list, doc="List of supported ISO language codes")
-    model_type = Column(String(32), nullable=False, index=True, doc="Model pipeline type: openvoice_reference or rvc_model")
+    model_type = Column(String(32), nullable=False, index=True, doc="Model pipeline type: chatterbox_reference")
     preview_file = Column(String(256), nullable=True, doc="Relative path to preview audio sample under voices dir")
     asset_file = Column(String(256), nullable=False, doc="Relative path to model checkpoint or reference wav")
     license = Column(Text, nullable=False, doc="Declared license or provenance text")

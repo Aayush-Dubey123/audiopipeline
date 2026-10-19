@@ -64,7 +64,7 @@ def get_health() -> HealthResponse:
     description="Retrieves available registered voices, filtering out experimental models if disabled.",
 )
 def list_voices(
-    model_type: Optional[str] = Query(None, description="Optional pipeline type filter (openvoice_reference or rvc_model)"),
+    model_type: Optional[str] = Query(None, description="Optional pipeline type filter (chatterbox_reference)"),
     db: Session = Depends(get_db),
 ) -> VoiceListResponse:
     """

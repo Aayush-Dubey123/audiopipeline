@@ -27,12 +27,18 @@ from core.services.audio.validation_service import (
     ReferenceQualityError,
 )
 from core.services.llm.llm_service import LLMService
-from core.apis.schemas.requests.job_requests import TTSJobRequest, TextCleanupRequest
+from core.apis.schemas.requests.job_requests import (
+    TTSJobRequest,
+    TextCleanupRequest,
+    TTSPreviewRequest,
+)
 from core.apis.schemas.responses.job_responses import (
     JobCreatedResponse,
     JobStatusResponse,
     JobDeleteResponse,
     TextCleanupResponse,
+    ReferenceCheckResponse,
+    TTSPreviewResponse,
 )
 
 logging = logger(__name__)
@@ -134,10 +140,10 @@ class JobController:
                 detail=f"Voice '{request.voice_id}' was not found.",
             )
 
-        if voice.model_type != "openvoice_reference":
+        if voice.model_type not in ("chatterbox_reference", "openvoice_reference"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Voice '{voice.name}' is a voice conversion model and cannot be used for text-to-speech.",
+                detail=f"Voice '{voice.name}' has invalid model type '{voice.model_type}'.",
             )
 
         lang = request.language.lower().strip()
@@ -350,9 +356,10 @@ class JobController:
             HTTPException 429: If queue is full or per-client quota is reached.
         """
         logging.info(f"Executing JobController.create_vc_job for voice '{voice_id}' (pitch={pitch_shift})")
-        cls._check_client_active_job_quota(db=db, client_key=client_key)
-
-        voice = VoiceCRUD.get_voice_by_id(db=db, voice_id=voice_id)
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Voice-to-voice conversion is currently disabled (coming soon).",
+        )
         if not voice:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -500,6 +507,47 @@ class JobController:
         output_url = f"/v1/audio/{job_id}/output" if job.status == "completed" else None
         source_url = f"/v1/audio/{job_id}/source" if job.kind in ("vc", "tts_custom") else None
 
+        output_files = None
+        confidence_label = None
+        if job.status == "completed":
+            job_dir = (settings.tmp_path / job_id).resolve()
+            wav_file = job_dir / "output.wav"
+            mp3_file = job_dir / "output.mp3"
+            mp3_small_file = job_dir / "output_small.mp3"
+            output_files = {
+                "wav": {
+                    "url": f"/v1/audio/{job_id}/output?format=wav",
+                    "size_bytes": wav_file.stat().st_size if wav_file.is_file() else 0,
+                    "hint": "Master uncompressed audio for video editing",
+                },
+                "mp3": {
+                    "url": f"/v1/audio/{job_id}/output?format=mp3",
+                    "size_bytes": mp3_file.stat().st_size if mp3_file.is_file() else 0,
+                    "hint": "High-fidelity 192 kbps MP3 for quality sharing",
+                },
+                "mp3_small": {
+                    "url": f"/v1/audio/{job_id}/output?format=mp3_small",
+                    "size_bytes": mp3_small_file.stat().st_size if mp3_small_file.is_file() else 0,
+                    "hint": "Lightweight 64 kbps mono MP3 for quick WhatsApp review",
+                },
+            }
+            if job.output_metadata and isinstance(job.output_metadata, dict):
+                confidence_label = job.output_metadata.get("confidence_label")
+
+        stage = job.stage
+        stage_index = job.stage_index
+        stage_total = job.stage_total or 4
+        if stage is None:
+            if job.status == "queued":
+                stage = "Queued"
+                stage_index = 1
+            elif job.status == "processing":
+                stage = "Generating speech"
+                stage_index = 3
+            elif job.status == "completed":
+                stage = "Completed"
+                stage_index = 4
+
         return JobStatusResponse(
             job_id=job.id,
             kind=job.kind,
@@ -508,14 +556,21 @@ class JobController:
             progress_message=job.progress_message,
             error_code=job.error_code,
             error_message=job.error_message,
+            stage=stage,
+            stage_index=stage_index,
+            stage_total=stage_total,
             chunk_done=job.chunk_done,
             chunk_total=job.chunk_total,
             eta_seconds=job.eta_seconds,
             created_at=job.created_at,
+            started_at=job.started_at,
+            updated_at=job.updated_at,
             completed_at=job.completed_at,
             expires_at=job.expires_at,
             output_url=output_url,
             source_url=source_url,
+            output_files=output_files,
+            confidence_label=confidence_label,
         )
 
     @staticmethod
@@ -526,7 +581,7 @@ class JobController:
         Args:
             db (Session): Active database session.
             job_id (str): Unique job identifier.
-            audio_format (str): Requested audio format ('wav' or 'mp3').
+            audio_format (str): Requested audio format ('wav', 'mp3', or 'mp3_small').
 
         Returns:
             Tuple[Path, str, str]: File path, MIME media type, and download filename.
@@ -537,10 +592,10 @@ class JobController:
         """
         logging.info(f"Executing JobController.get_job_output_file for job '{job_id}' (format={audio_format})")
         fmt = audio_format.lower().strip()
-        if fmt not in ("wav", "mp3"):
+        if fmt not in ("wav", "mp3", "mp3_small"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Supported audio formats are 'wav' and 'mp3'.",
+                detail="Supported audio formats are 'wav', 'mp3', and 'mp3_small'.",
             )
 
         job = JobCRUD.get_job_by_id(db=db, job_id=job_id)
@@ -579,19 +634,31 @@ class JobController:
         if fmt == "wav":
             return wav_path, "audio/wav", f"{job_id}_output.wav"
 
-        # On-demand MP3 export
-        mp3_path = job_dir / "output.mp3"
-        if not mp3_path.is_file():
+        if fmt == "mp3":
+            mp3_path = job_dir / "output.mp3"
+            if not mp3_path.is_file():
+                try:
+                    AudioService.export_mp3(wav_path, mp3_path, bitrate="192k", mono=False)
+                except Exception as mp3_err:
+                    logging.error(f"Failed to export MP3 for job '{job_id}': {mp3_err}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Audio format conversion failed",
+                    )
+            return mp3_path, "audio/mpeg", f"{job_id}_output.mp3"
+
+        # fmt == "mp3_small"
+        mp3_small_path = job_dir / "output_small.mp3"
+        if not mp3_small_path.is_file():
             try:
-                AudioService.export_mp3(wav_path, mp3_path)
+                AudioService.export_mp3(wav_path, mp3_small_path, bitrate="64k", mono=True)
             except Exception as mp3_err:
-                logging.error(f"Failed to export MP3 for job '{job_id}': {mp3_err}")
+                logging.error(f"Failed to export small MP3 for job '{job_id}': {mp3_err}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Audio format conversion failed",
                 )
-
-        return mp3_path, "audio/mpeg", f"{job_id}_output.mp3"
+        return mp3_small_path, "audio/mpeg", f"{job_id}_output_whatsapp_small.mp3"
 
     @staticmethod
     def get_job_source_file(db: Session, job_id: str) -> Tuple[Path, str, str]:
@@ -770,3 +837,223 @@ class JobController:
             message=f"Job resumed successfully from chunk {finished_count}.",
             ai_generated=True,
         )
+
+    @classmethod
+    async def check_reference_safety(
+        cls,
+        db: Session,
+        client_key: str,
+        file: Optional[UploadFile] = None,
+        voice_id: Optional[str] = None,
+    ) -> ReferenceCheckResponse:
+        """
+        Evaluate reference audio acoustic safety (length, loudness, noise, clipping, reverb, speaker, music).
+        """
+        logging.info("Executing JobController.check_reference_safety")
+        if file is not None:
+            temp_dir = settings.tmp_path / "reference_checks"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            saved_path = await ValidationService.stream_upload_to_disk(
+                upload_file=file,
+                destination_dir=temp_dir,
+                max_bytes=settings.MAX_UPLOAD_MB * 1024 * 1024,
+            )
+            try:
+                res = ValidationService.check_reference_safety(saved_path)
+                return ReferenceCheckResponse(**res)
+            finally:
+                saved_path.unlink(missing_ok=True)
+        elif voice_id:
+            voice = VoiceCRUD.get_voice_by_id(db, voice_id)
+            if not voice:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Voice '{voice_id}' not found")
+            ref_path = (settings.voices_path / voice.asset_file).resolve()
+            if not ref_path.exists():
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Voice audio asset not found on disk")
+            res = ValidationService.check_reference_safety(ref_path)
+            return ReferenceCheckResponse(**res)
+        else:
+            default_ref = settings.voices_path / "reference" / "client_ref.wav"
+            if not default_ref.exists():
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No reference file available to check")
+            res = ValidationService.check_reference_safety(default_ref)
+            return ReferenceCheckResponse(**res)
+
+    @classmethod
+    def generate_tts_preview(
+        cls,
+        db: Session,
+        client_key: str,
+        request: TTSPreviewRequest,
+    ) -> TTSPreviewResponse:
+        """
+        Generate rapid preview of up to 200 characters using the voice pipeline.
+
+        Supports both asynchronous job queuing with stage tracking and direct synchronous generation.
+
+        Args:
+            db (Session): Active database session.
+            client_key (str): Hashed client key for quota enforcement.
+            request (TTSPreviewRequest): Preview parameters including text, voice, and speed.
+
+        Returns:
+            TTSPreviewResponse: Structured preview confirmation with job_id and preview_url.
+
+        Raises:
+            HTTPException 400: If text is empty.
+            HTTPException 404: If reference audio cannot be found.
+            HTTPException 500: If synchronous synthesis fails.
+        """
+        logging.info("Executing JobController.generate_tts_preview")
+        import uuid
+        from datetime import datetime, timezone, timedelta
+        from core.services.jobs.job_worker import job_worker
+
+        preview_text = request.text.strip()[:200]
+        if not preview_text:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Text cannot be empty.")
+
+        ref_path = None
+        voice = None
+        if request.voice_id:
+            voice = VoiceCRUD.get_voice_by_id(db, request.voice_id)
+            if voice and hasattr(voice, "asset_file") and voice.asset_file:
+                p = (settings.voices_path / voice.asset_file).resolve()
+                if p.exists():
+                    ref_path = p
+
+        if not ref_path:
+            p = (settings.voices_path / "reference" / "client_ref.wav").resolve()
+            if p.exists():
+                ref_path = p
+
+        if not ref_path or not ref_path.exists():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reference audio for preview not found.")
+
+        job_id = uuid.uuid4().hex
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.JOB_TTL_MINUTES)
+        now = datetime.now(timezone.utc)
+
+        if not request.sync:
+            # Enqueue asynchronous preview job
+            job_data = {
+                "id": job_id,
+                "kind": "preview",
+                "status": "queued",
+                "stage": "Queued",
+                "stage_index": 1,
+                "stage_total": 4,
+                "voice_id": request.voice_id or "client_ref",
+                "client_key": client_key,
+                "progress_message": "Preview job queued.",
+                "payload": {
+                    "text": preview_text,
+                    "voice_id": request.voice_id,
+                    "language": request.language or "hi",
+                    "speed": request.speed,
+                },
+                "created_at": now,
+                "updated_at": now,
+                "expires_at": expires_at,
+            }
+            JobCRUD.create_job(db, job_data)
+            job_worker.enqueue_job(job_id)
+
+            return TTSPreviewResponse(
+                job_id=job_id,
+                preview_url=f"/v1/audio/preview/{job_id}",
+                duration_seconds=0.0,
+                text_preview=preview_text,
+                confidence_label="good",
+            )
+
+        # Synchronous execution fallback
+        preview_dir = settings.tmp_path / job_id
+        preview_dir.mkdir(parents=True, exist_ok=True)
+        out_wav = preview_dir / "preview.wav"
+
+        from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+        pipeline_service = ChatterboxService()
+
+        try:
+            pipeline_service.generate(
+                text=preview_text,
+                reference_audio_path=str(ref_path),
+                output_path=str(out_wav),
+                speed=request.speed,
+                language=request.language or "hi",
+            )
+            AudioService.normalize_loudness(out_wav, out_wav)
+            AudioService.add_ai_label_metadata(out_wav)
+            meta = AudioService.probe_audio(out_wav)
+
+            # Persist completed job record for queries
+            job_data = {
+                "id": job_id,
+                "kind": "preview",
+                "status": "completed",
+                "stage": "Completed",
+                "stage_index": 4,
+                "stage_total": 4,
+                "voice_id": request.voice_id or "client_ref",
+                "client_key": client_key,
+                "progress_message": "Preview generation completed.",
+                "payload": {
+                    "text": preview_text,
+                    "voice_id": request.voice_id,
+                    "language": request.language or "hi",
+                    "speed": request.speed,
+                },
+                "output_metadata": {
+                    "duration_seconds": round(meta.duration_seconds, 2),
+                    "confidence_label": "good",
+                },
+                "created_at": now,
+                "started_at": now,
+                "updated_at": now,
+                "completed_at": now,
+                "expires_at": expires_at,
+            }
+            JobCRUD.create_job(db, job_data)
+        except Exception as err:
+            logging.error(f"Preview generation failed: {err}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Preview generation failed: {err}",
+            )
+
+        conf_label = "good"
+        return TTSPreviewResponse(
+            job_id=job_id,
+            preview_url=f"/v1/audio/preview/{job_id}",
+            duration_seconds=round(meta.duration_seconds, 2),
+            text_preview=preview_text,
+            confidence_label=conf_label,
+        )
+
+    @classmethod
+    def get_preview_file(cls, preview_id: str) -> Path:
+        """
+        Locate generated preview WAV audio file across staging locations.
+
+        Args:
+            preview_id (str): Identifier of preview job or session.
+
+        Returns:
+            Path: Verified path to the output WAV file.
+
+        Raises:
+            HTTPException 404: If preview file is not found.
+        """
+        logging.info(f"Executing JobController.get_preview_file for preview '{preview_id}'")
+        candidate_paths = [
+            (settings.tmp_path / preview_id / "preview.wav"),
+            (settings.tmp_path / preview_id / "output.wav"),
+            (settings.tmp_path / "previews" / preview_id / "preview.wav"),
+        ]
+        for p in candidate_paths:
+            if p.is_file():
+                return p.resolve()
+        logging.warning(f"Preview audio '{preview_id}' not found on disk")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Preview audio not found or expired.")
+

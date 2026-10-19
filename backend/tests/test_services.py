@@ -17,21 +17,7 @@ from core.services.audio.audio_service import (
     AudioCorruptError,
     AudioMetadata,
 )
-from core.services.pipelines.openvoice_service import (
-    OpenVoiceService,
-    ReferenceAudioNotFoundError,
-    ModelCheckpointNotFoundError,
-)
-from core.services.pipelines.rvc_service import (
-    RVCService,
-    RVCResult,
-    ModelCheckpointNotFoundError as RVCModelNotFoundError,
-    InputAudioNotFoundError,
-    SecurityValidationError,
-    verify_checkpoint_hash,
-)
-from core.services.pipelines.rvc_core.synthesizer import SynthesizerTrn
-from core.services.pipelines.rvc_core.rmvpe import MelSpectrogram, E2E
+from core.services.jobs.job_worker import split_text_with_boundaries
 from core.services.llm.llm_service import LLMService
 from core.services.audio.validation_service import (
     ValidationService,
@@ -129,6 +115,39 @@ def test_export_mp3_and_ai_metadata(synthetic_tone_wav: Path, temp_audio_dir: Pa
     assert "mp3" in meta.format_name.lower()
 
 
+def test_encoder_formats_and_tags(synthetic_tone_wav: Path, temp_audio_dir: Path) -> None:
+    """
+    Verify high-quality and small MP3 encoder durations match WAV within 50 ms and preserve tags.
+    """
+    wav_meta = AudioService.probe_audio(synthetic_tone_wav)
+    sizes = AudioService.export_all_formats(synthetic_tone_wav, temp_audio_dir)
+
+    mp3_path = temp_audio_dir / "output.mp3"
+    mp3_small_path = temp_audio_dir / "output_small.mp3"
+
+    assert mp3_path.exists()
+    assert mp3_small_path.exists()
+    assert sizes["wav_bytes"] > 0
+    assert sizes["mp3_bytes"] > 0
+    assert sizes["mp3_small_bytes"] > 0
+    assert sizes["mp3_small_bytes"] < sizes["mp3_bytes"]
+
+    mp3_meta = AudioService.probe_audio(mp3_path)
+    mp3_small_meta = AudioService.probe_audio(mp3_small_path)
+    assert abs(mp3_meta.duration_seconds - wav_meta.duration_seconds) <= 0.050
+    assert abs(mp3_small_meta.duration_seconds - wav_meta.duration_seconds) <= 0.050
+    assert mp3_small_meta.channels == 1
+
+    mp3_tags = AudioService.read_audio_tags(mp3_path)
+    mp3_small_tags = AudioService.read_audio_tags(mp3_small_path)
+
+    all_mp3_tag_text = " ".join(f"{k}:{v}" for k, v in mp3_tags.items()).lower()
+    all_small_tag_text = " ".join(f"{k}:{v}" for k, v in mp3_small_tags.items()).lower()
+
+    assert "ai" in all_mp3_tag_text or "voice studio" in all_mp3_tag_text
+    assert "ai" in all_small_tag_text or "voice studio" in all_small_tag_text
+
+
 def test_probe_corrupt_file_raises_custom_error(temp_audio_dir: Path) -> None:
     """
     Verify corrupt or non-audio inputs raise AudioCorruptError instead of unhandled exceptions.
@@ -149,401 +168,10 @@ def test_probe_missing_file_raises_custom_error(temp_audio_dir: Path) -> None:
         AudioService.probe_audio(missing_file)
 
 
-def test_openvoice_service_initialization() -> None:
-    """
-    Verify OpenVoiceService defaults to valid paths and enables watermark.
-    """
-    service = OpenVoiceService()
-    assert service.enable_watermark is True
-    assert service.device in ("cuda:0", "cpu")
-    assert service.converter_dir.name == "converter"
 
 
-def test_openvoice_missing_reference_raises_custom_error(temp_audio_dir: Path) -> None:
-    """
-    Verify generate with a nonexistent reference file raises ReferenceAudioNotFoundError.
-    """
-    service = OpenVoiceService()
-    missing_ref = temp_audio_dir / "nonexistent_reference.wav"
-    out_file = temp_audio_dir / "out.wav"
 
-    with pytest.raises(ReferenceAudioNotFoundError):
-        service.generate(
-            text="Test text",
-            reference_audio_path=str(missing_ref),
-            output_path=str(out_file),
-        )
 
-
-def test_openvoice_empty_text_raises_value_error(temp_audio_dir: Path, synthetic_tone_wav: Path) -> None:
-    """
-    Verify generate with empty or whitespace-only text raises ValueError.
-    """
-    service = OpenVoiceService()
-    out_file = temp_audio_dir / "out.wav"
-
-    with pytest.raises(ValueError):
-        service.generate(
-            text="   ",
-            reference_audio_path=str(synthetic_tone_wav),
-            output_path=str(out_file),
-        )
-
-
-def test_openvoice_missing_checkpoint_raises_error(temp_audio_dir: Path, synthetic_tone_wav: Path) -> None:
-    """
-    Verify service configured with nonexistent checkpoint path raises ModelCheckpointNotFoundError.
-    """
-    fake_converter_dir = temp_audio_dir / "missing_converter"
-    service = OpenVoiceService(converter_dir=str(fake_converter_dir))
-    out_file = temp_audio_dir / "out.wav"
-
-    with pytest.raises(ModelCheckpointNotFoundError):
-        service.generate(
-            text="Valid test sentence",
-            reference_audio_path=str(synthetic_tone_wav),
-            output_path=str(out_file),
-        )
-
-
-def test_openvoice_cpu_device_configuration() -> None:
-    """
-    Verify OpenVoiceService supports explicit CPU device assignment and handles CUDA cleanup safely.
-    """
-    service = OpenVoiceService(device="cpu", enable_watermark=False)
-    assert service.device == "cpu"
-    assert service.enable_watermark is False
-
-
-def test_openvoice_watermark_enabled_by_default() -> None:
-    """
-    Verify OpenVoiceService defaults to enabling the MyShell audio watermark.
-    """
-    service = OpenVoiceService()
-    assert service.enable_watermark is True
-
-
-# ============================================================================
-# RVC Pipeline Tests (Phase 4)
-# ============================================================================
-
-
-def test_rvc_service_initialization() -> None:
-    """
-    Verify RVCService initializes with default paths and unloaded model state.
-
-    Args:
-        None
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If default paths or initial model states are invalid.
-    """
-    service = RVCService(device="cpu")
-    assert service.device == "cpu"
-    assert service.is_half is False
-    assert service.models_dir.name == "rvc_models"
-    assert service.rmvpe_path.name == "rmvpe.pt"
-    assert service._net_g is None
-    assert service._rmvpe is None
-    assert service._hubert_model is None
-
-
-def test_rvc_pitch_shift_bounds_validation(synthetic_tone_wav: Path, temp_audio_dir: Path) -> None:
-    """
-    Verify internal pitch shift bounds enforce [-24, +24] semitones strictly.
-
-    Args:
-        synthetic_tone_wav (Path): 1-second test WAV audio fixture.
-        temp_audio_dir (Path): Temporary output directory fixture.
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If pitch bounds validation allows out-of-range values.
-    """
-    service = RVCService(device="cpu")
-    out_file = temp_audio_dir / "out_rvc.wav"
-    fake_model = temp_audio_dir / "fake.pth"
-
-    # Out-of-bounds high (+25)
-    with pytest.raises(ValueError, match=r"between -24 and \+24"):
-        service.convert(
-            source_audio_path=synthetic_tone_wav,
-            voice_model_path=fake_model,
-            output_path=out_file,
-            pitch_shift=25,
-        )
-
-    # Out-of-bounds low (-25)
-    with pytest.raises(ValueError, match=r"between -24 and \+24"):
-        service.convert(
-            source_audio_path=synthetic_tone_wav,
-            voice_model_path=fake_model,
-            output_path=out_file,
-            pitch_shift=-25,
-        )
-
-
-def test_rvc_missing_input_audio_raises_error(temp_audio_dir: Path) -> None:
-    """
-    Verify convert raises InputAudioNotFoundError when input audio file is missing.
-
-    Args:
-        temp_audio_dir (Path): Temporary directory fixture.
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If InputAudioNotFoundError is not raised.
-    """
-    service = RVCService(device="cpu")
-    missing_audio = temp_audio_dir / "nonexistent_source.wav"
-    fake_model = temp_audio_dir / "fake.pth"
-    out_file = temp_audio_dir / "out_rvc.wav"
-
-    with pytest.raises(InputAudioNotFoundError):
-        service.convert(
-            source_audio_path=missing_audio,
-            voice_model_path=fake_model,
-            output_path=out_file,
-            pitch_shift=0,
-        )
-
-
-def test_rvc_missing_model_checkpoint_raises_error(synthetic_tone_wav: Path, temp_audio_dir: Path) -> None:
-    """
-    Verify convert raises ModelCheckpointNotFoundError when .pth model is missing.
-
-    Args:
-        synthetic_tone_wav (Path): Test audio input fixture.
-        temp_audio_dir (Path): Temporary directory fixture.
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If ModelCheckpointNotFoundError is not raised.
-    """
-    service = RVCService(device="cpu")
-    missing_model = temp_audio_dir / "nonexistent_model.pth"
-
-    with pytest.raises(RVCModelNotFoundError):
-        service.load_voice_model(missing_model)
-
-
-def test_rvc_security_validation_weights_only(temp_audio_dir: Path) -> None:
-    """
-    Verify checkpoint loading strictly enforces weights_only=True and rejects arbitrary code execution.
-
-    Args:
-        temp_audio_dir (Path): Temporary directory fixture.
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If SecurityValidationError is not raised on unsafe checkpoints.
-    """
-    exploit_file = temp_audio_dir / "exploit.pth"
-
-    class ExploitPayload:
-        def __reduce__(self):
-            return (os.system, ("dir",))
-
-    with open(exploit_file, "wb") as f:
-        pickle.dump(ExploitPayload(), f)
-
-    service = RVCService(device="cpu")
-    with pytest.raises(SecurityValidationError):
-        service.load_voice_model(exploit_file)
-
-
-def test_rvc_verify_checkpoint_hash(temp_audio_dir: Path) -> None:
-    """
-    Verify verify_checkpoint_hash validates matching hashes and rejects mismatches with SecurityValidationError.
-
-    Args:
-        temp_audio_dir (Path): Temporary directory fixture.
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If hash verification behaves unexpectedly.
-    """
-    test_file = temp_audio_dir / "hash_test.bin"
-    test_file.write_bytes(b"TEST_MODEL_BINARY_DATA_FOR_HASH_CHECK")
-
-    expected = hashlib.sha256(b"TEST_MODEL_BINARY_DATA_FOR_HASH_CHECK").hexdigest()
-    assert verify_checkpoint_hash(test_file, expected) is True
-
-    with pytest.raises(SecurityValidationError):
-        verify_checkpoint_hash(test_file, "0" * 64)
-
-
-def test_rvc_mutual_unloading() -> None:
-    """
-    Verify mutual model unloading between OpenVoice and RVC resets GPU caches and releases models.
-
-    Args:
-        None
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If model unload methods fail to clear cached references.
-    """
-    ov_service = OpenVoiceService(device="cpu")
-    rvc_service = RVCService(device="cpu")
-
-    # Set mock references
-    rvc_service._net_g = "mock_net_g"  # type: ignore
-    rvc_service._rmvpe = "mock_rmvpe"  # type: ignore
-    rvc_service._hubert_model = "mock_hubert"  # type: ignore
-
-    rvc_service.unload_models()
-    assert rvc_service._net_g is None
-    assert rvc_service._rmvpe is None
-    assert rvc_service._hubert_model is None
-
-    # Test class-level unload_all
-    rvc_service._net_g = "mock_net_g"  # type: ignore
-    RVCService.unload_all()
-    assert rvc_service._net_g is None
-
-    ov_service._converter = "mock_converter"  # type: ignore
-    OpenVoiceService.unload_all()
-    assert ov_service._converter is None
-
-
-def test_rvc_synthesizer_trn_forward_cpu() -> None:
-    """
-    Verify forward inference through SynthesizerTrn generates audio tensor on CPU.
-
-    Args:
-        None
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If synthesis output shape or dimensions are invalid.
-    """
-    net_g = SynthesizerTrn(
-        spec_channels=1025,
-        segment_size=32,
-        inter_channels=64,
-        hidden_channels=64,
-        filter_channels=128,
-        n_heads=2,
-        n_layers=2,
-        kernel_size=3,
-        p_dropout=0.0,
-        resblock="1",
-        resblock_kernel_sizes=[3, 7],
-        resblock_dilation_sizes=[[1, 3], [1, 3]],
-        upsample_rates=[4, 4],
-        upsample_initial_channel=64,
-        upsample_kernel_sizes=[8, 8],
-        spk_embed_dim=1,
-        gin_channels=64,
-        sr=40000,
-        is_half=False,
-        version="v2",
-    )
-    net_g.eval()
-
-    phone = torch.randn(1, 8, 768)
-    phone_lengths = torch.tensor([8], dtype=torch.long)
-    pitch = torch.randint(1, 100, (1, 8), dtype=torch.long)
-    nsff0 = torch.randn(1, 8)
-    sid = torch.tensor([0], dtype=torch.long)
-
-    with torch.no_grad():
-        out = net_g.infer(phone, phone_lengths, pitch, nsff0, sid)
-
-    assert out is not None
-    assert out.dim() == 3
-    assert out.shape[0] == 1
-    assert out.shape[1] == 1
-    assert out.shape[2] == 8 * 16  # upsample_rates [4, 4] -> 16x
-
-
-def test_rvc_rmvpe_mel_and_hidden_forward_cpu() -> None:
-    """
-    Verify RMVPE MelSpectrogram and E2E feature extraction forward pass on CPU.
-
-    Args:
-        None
-
-    Returns:
-        None
-
-    Raises:
-        AssertionError: If mel spectrogram or hidden pitch features have incorrect dimensions.
-    """
-    mel_extractor = MelSpectrogram(128, 16000, 1024, 160, 30.0, 8000.0)
-    e2e = E2E(4, 1, (2, 2))
-    e2e.eval()
-
-    audio = torch.randn(1, 16000)
-    with torch.no_grad():
-        mel = mel_extractor(audio)
-        n_frames = mel.shape[-1]
-        n_pad = 32 * ((n_frames - 1) // 32 + 1) - n_frames
-        mel_padded = F.pad(mel, (0, n_pad), mode="constant") if n_pad > 0 else mel
-        hidden = e2e(mel_padded)[:, :n_frames]
-
-    assert mel.dim() == 3
-    assert mel.shape[1] == 128
-    assert hidden.dim() == 3
-    assert hidden.shape[-1] == 360  # 360 pitch frequency bins
-
-
-@pytest.mark.slow
-def test_rvc_real_inference_slow(temp_audio_dir: Path, synthetic_tone_wav: Path) -> None:
-    """
-    Perform complete real RVC inference using available disk checkpoints.
-
-    Args:
-        temp_audio_dir (Path): Working test directory fixture.
-        synthetic_tone_wav (Path): Test input audio fixture.
-
-    Returns:
-        None
-
-    Raises:
-        pytest.skip: When real checkpoints are not present on disk.
-        AssertionError: If inference outcome metadata is invalid.
-    """
-    service = RVCService()
-    checkpoint_candidates = [
-        service.models_dir / "checkpoints" / "test_voice.pth",
-        service.models_dir / "checkpoints" / "NttsAI.pth",
-    ]
-    test_voice_checkpoint = next((p for p in checkpoint_candidates if p.exists()), None)
-
-    if not service.rmvpe_path.exists() or test_voice_checkpoint is None:
-        pytest.skip("RVC real checkpoints (rmvpe.pt or voice .pth) not present on disk")
-
-    out_file = temp_audio_dir / "real_rvc_output.wav"
-    result: RVCResult = service.convert(
-        source_audio_path=synthetic_tone_wav,
-        voice_model_path=test_voice_checkpoint,
-        output_path=out_file,
-        pitch_shift=0,
-    )
-
-    assert out_file.exists()
-    assert result.duration_seconds > 0.0
-    assert result.sample_rate > 0
-    assert result.file_size_bytes > 0
 
 
 # ==============================================================================
@@ -572,13 +200,16 @@ def test_voice_crud_sync_and_filtering(tmp_path: Path) -> None:
         ref_dir = voices_dir / "reference"
         ref_dir.mkdir()
         valid_wav = ref_dir / "sample.wav"
-        valid_wav.write_bytes(b"RIFFdummydataWAVEfmt ")
+        sr = 22050
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        tone = 0.5 * np.sin(2 * np.pi * 440 * t)
+        sf.write(str(valid_wav), tone, sr)
 
         manifest = [
             {
                 "id": "test_valid_voice",
                 "name": "Test Valid Voice",
-                "model_type": "openvoice_reference",
+                "model_type": "chatterbox_reference",
                 "asset_file": "reference/sample.wav",
                 "license": "MIT",
                 "usage_permission": "Public",
@@ -587,7 +218,7 @@ def test_voice_crud_sync_and_filtering(tmp_path: Path) -> None:
             {
                 "id": "test_traversal",
                 "name": "Bad Traversal",
-                "model_type": "openvoice_reference",
+                "model_type": "chatterbox_reference",
                 "asset_file": "../outside.wav",
                 "license": "MIT",
                 "usage_permission": "Public",
@@ -596,7 +227,7 @@ def test_voice_crud_sync_and_filtering(tmp_path: Path) -> None:
             {
                 "id": "test_missing_file",
                 "name": "Missing File",
-                "model_type": "openvoice_reference",
+                "model_type": "chatterbox_reference",
                 "asset_file": "reference/missing.wav",
                 "license": "MIT",
                 "usage_permission": "Public",
@@ -625,6 +256,10 @@ def test_voice_crud_sync_and_filtering(tmp_path: Path) -> None:
         missing = VoiceCRUD.get_voice_by_id(db, "non_existent")
         assert missing is None
     finally:
+        voice = VoiceCRUD.get_voice_by_id(db, "test_valid_voice")
+        if voice:
+            db.delete(voice)
+            db.commit()
         db.close()
 
 
@@ -701,8 +336,6 @@ def test_splitter_devanagari_boundaries() -> None:
     """
     Verify text splitter correctly segments Hindi/Devanagari text at purna viram (। and ॥).
     """
-    from core.services.pipelines.openvoice_service import split_text_with_boundaries
-
     hi_text = (
         "नमस्ते! आज हम आर्टिफिशियल इंटेलिजेंस के बारे में बात करेंगे। "
         "यह तकनीक शब्दों को आवाज़ में बदलती है॥ "
@@ -720,8 +353,6 @@ def test_splitter_abbreviations_and_decimals() -> None:
     """
     Verify text splitter does NOT split at known abbreviations (Dr., Mr., etc.) or decimal numbers.
     """
-    from core.services.pipelines.openvoice_service import split_text_with_boundaries
-
     text = "Dr. Smith met with Mr. Jones at 1.5 miles past the clinic. They agreed on 99.9 percent of the points."
     chunks, _ = split_text_with_boundaries(text, max_chars=200)
     # The whole paragraph should remain a single chunk because none of the periods are true sentence ends
@@ -737,8 +368,6 @@ def test_splitter_very_long_sentences_no_midword_cuts() -> None:
     Verify very long sentences without sentence punctuation are split at whitespace boundaries,
     ensuring words are never cut in half and every chunk is strictly within max_chars.
     """
-    from core.services.pipelines.openvoice_service import split_text_with_boundaries
-
     # 300 words without any period, question mark, or exclamation mark
     words = [f"word{i:03d}" for i in range(300)]
     long_text = " ".join(words)
@@ -760,19 +389,147 @@ def test_splitter_very_long_sentences_no_midword_cuts() -> None:
     assert reconstructed_words == words
 
 
-def test_hindi_input_validation_devanagari_vs_hinglish() -> None:
-    """
-    Verify prepare_hindi_text allows native Devanagari and rejects Latin / Hinglish text.
-    """
-    from core.services.pipelines.openvoice_service import prepare_hindi_text
+# ==============================================================================
+# SECTION 8: CHATTERBOX ZERO-SHOT PIPELINE TESTS (FAKE PIPELINE)
+# ==============================================================================
 
-    # 1. Native Devanagari passes
-    valid_devanagari = "यह एक मान्य देवनागरी वाक्य है।"
-    assert prepare_hindi_text(valid_devanagari) == valid_devanagari
 
-    # 2. Romanized Hinglish raises ValueError
-    hinglish_text = "Yeh ek romanized Hinglish sentence hai jo accept nahi hona chahiye."
-    with pytest.raises(ValueError, match="Devanagari"):
-        prepare_hindi_text(hinglish_text)
+def test_chatterbox_service_generate_fake_pipeline(temp_audio_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify ChatterboxService dispatches to worker process and returns structured result with fake pipeline.
+    """
+    import subprocess
+    from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+
+    ref_wav = temp_audio_dir / "client_ref.wav"
+    out_wav = temp_audio_dir / "output_test.wav"
+
+    # Create dummy reference WAV
+    sr = 44100
+    t = np.linspace(0, 1.0, sr, endpoint=False)
+    sine = 0.3 * np.sin(2 * np.pi * 440 * t)
+    sf.write(str(ref_wav), sine, sr)
+
+    # Mock subprocess.run to simulate worker process output
+    def fake_subprocess_run(cmd, **kwargs):
+        # Write dummy output audio
+        sf.write(str(out_wav), sine, sr)
+        mock_res = subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout='{"status": "ok", "duration_seconds": 1.0, "sample_rate": 44100, "peak_vram_mb": 128.5, "gen_time_s": 0.5}',
+            stderr="",
+        )
+        return mock_res
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+    service = ChatterboxService()
+    result = service.generate(
+        text="नमस्ते! यह एक परीक्षण वाक्य है।",
+        reference_audio_path=str(ref_wav),
+        output_path=str(out_wav),
+        language="hi",
+    )
+
+    assert result.output_path == str(out_wav)
+    assert result.duration_seconds == 1.0
+    assert result.sample_rate == 44100
+    assert result.peak_vram_mb == 128.5
+    assert out_wav.exists()
+
+
+def test_chatterbox_service_subprocess_failure(temp_audio_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify ChatterboxService raises RuntimeError when worker process exits with non-zero code.
+    """
+    import subprocess
+    from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+
+    ref_wav = temp_audio_dir / "client_ref.wav"
+    out_wav = temp_audio_dir / "output_fail.wav"
+    sr = 44100
+    sine = np.zeros(sr)
+    sf.write(str(ref_wav), sine, sr)
+
+    def fake_failed_subprocess(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr="CUDA out of memory error in worker",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_failed_subprocess)
+
+    service = ChatterboxService()
+    with pytest.raises(RuntimeError, match="Chatterbox generation failed"):
+        service.generate(
+            text="परीक्षण",
+            reference_audio_path=str(ref_wav),
+            output_path=str(out_wav),
+            language="hi",
+        )
+
+
+def test_reference_safety_check_valid_and_blocks(temp_audio_dir: Path) -> None:
+    """
+    Verify reference safety checker returns score, advice, and blocks unusable audio.
+    """
+    sr = 22050
+    # 1. Clean speech-like audio (modulated bursts with natural pauses)
+    burst = 0.3 * np.sin(2 * np.pi * 200 * np.linspace(0, 0.6, int(sr * 0.6)))
+    pause = np.zeros(int(sr * 0.3))
+    pattern = np.concatenate([burst, pause] * 12)
+    clean_path = temp_audio_dir / "clean_ref.wav"
+    sf.write(str(clean_path), pattern, sr)
+
+    res_clean = ValidationService.check_reference_safety(clean_path)
+    assert res_clean["score"] > 50
+    assert res_clean["is_usable"] is True
+    assert len(res_clean["advice"]) > 0
+
+    # 2. Too-short audio (0.5s) -> must be hard blocked
+    short_t = np.linspace(0, 0.5, int(sr * 0.5), endpoint=False)
+    short_audio = 0.3 * np.sin(2 * np.pi * 220 * short_t)
+    short_path = temp_audio_dir / "short_ref.wav"
+    sf.write(str(short_path), short_audio, sr)
+
+    res_short = ValidationService.check_reference_safety(short_path)
+    assert res_short["is_usable"] is False
+    assert any("too short" in adv.lower() for adv in res_short["advice"])
+
+    # 3. Severely clipped audio -> must be hard blocked
+    clipped_audio = np.ones(int(sr * 5.0)) * 0.999
+    clipped_path = temp_audio_dir / "clipped_ref.wav"
+    sf.write(str(clipped_path), clipped_audio, sr)
+
+    res_clipped = ValidationService.check_reference_safety(clipped_path)
+    assert res_clipped["is_usable"] is False
+    assert any("clipping" in adv.lower() for adv in res_clipped["advice"])
+
+
+def test_chatterbox_service_availability_check(monkeypatch, temp_audio_dir: Path) -> None:
+    """
+    Verify ChatterboxService detects environment availability correctly.
+    """
+    import sys
+    import subprocess
+    from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+
+    # 1. Non-existent python executable -> False
+    service_bad = ChatterboxService(python_executable=str(temp_audio_dir / "nonexistent_python.exe"))
+    assert service_bad.is_available() is False
+
+    # 2. Mock successful import
+    def fake_ok_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_ok_run)
+    service_good = ChatterboxService(python_executable=sys.executable)
+    assert service_good.is_available() is True
+
+
+
 
 

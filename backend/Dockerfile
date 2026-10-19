@@ -31,9 +31,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY requirements-ml.txt ./
-RUN pip install --no-cache-dir -r requirements-ml.txt
-
 # Copy backend codebase
 COPY core ./core
 COPY commons ./commons

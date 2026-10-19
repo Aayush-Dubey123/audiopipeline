@@ -63,10 +63,10 @@ class Settings(BaseSettings):
     MAX_TEXT_CHARS: int = Field(default=30000, description="Maximum script text character count (long-form enabled)")
 
     # Long-form chunk pipeline settings
-    CHUNK_MAX_CHARS: int = Field(default=1000, description="Maximum characters per synthesis chunk")
+    CHUNK_MAX_CHARS: int = Field(default=220, description="Maximum characters per synthesis chunk")
     CHUNK_PAUSE_SENTENCE_MS: int = Field(default=250, description="Silence gap between sentence chunks in milliseconds")
     CHUNK_PAUSE_PARAGRAPH_MS: int = Field(default=600, description="Silence gap between paragraph chunks in milliseconds")
-    CHUNK_TIMEOUT_SECONDS: int = Field(default=120, description="Timeout per individual synthesis chunk in seconds")
+    CHUNK_TIMEOUT_SECONDS: int = Field(default=180, description="Timeout per individual synthesis chunk in seconds")
     JOB_MAX_SECONDS: int = Field(default=7200, description="Absolute wall-clock limit for a single job (2 hours)")
 
     JOB_TTL_MINUTES: int = Field(default=240, description="Job artifact retention time in minutes, counted from job completion")
@@ -84,6 +84,19 @@ class Settings(BaseSettings):
     EXPOSE_EXPERIMENTAL_VOICES: bool = Field(
         default=False,
         description="Whether experimental voice entries are exposed in public endpoints",
+    )
+
+    CHATTERBOX_PYTHON_PATH: str = Field(
+        default="",
+        description="Path to python executable with chatterbox dependencies installed. If empty, checks backend/.venv_chatterbox or system environment",
+    )
+    TTS_CONFIDENCE_GOOD_THRESHOLD: float = Field(
+        default=0.70,
+        description="Speaker similarity threshold for 'good' confidence label",
+    )
+    TTS_CONFIDENCE_FAIR_THRESHOLD: float = Field(
+        default=0.56,
+        description="Speaker similarity threshold for 'fair' confidence label",
     )
 
     @property
