@@ -431,24 +431,20 @@ def _run_long_form_tts(
             chunk_lang = "hi" if any("\u0900" <= c <= "\u097F" for c in chunk_text) else language
 
             # Synthesize chunk to .part file
-            if hasattr(service, "generate") and "force_recompute_se" in getattr(service.generate, "__code__", object()).co_varnames:
-                res = service.generate(
-                    text=chunk_text,
-                    reference_audio_path=str(ref_path),
-                    output_path=str(chunk_part),
-                    speed=speed,
-                    language=chunk_lang,
-                    force_recompute_se=force_recompute_se,
-                )
-            else:
-                res = service.generate(
-                    text=chunk_text,
-                    reference_audio_path=str(ref_path),
-                    output_path=str(chunk_part),
-                    speed=speed,
-                    language=chunk_lang,
-                )
-            force_recompute_se = False
+            gen_kwargs = {
+                "text": chunk_text,
+                "reference_audio_path": str(ref_path),
+                "output_path": str(chunk_part),
+                "language": chunk_lang,
+            }
+            if hasattr(service, "generate"):
+                import inspect
+                try:
+                    if "speed" in inspect.signature(service.generate).parameters:
+                        gen_kwargs["speed"] = speed
+                except Exception:
+                    pass
+            res = service.generate(**gen_kwargs)
 
             # Atomically rename .part to final chunk .wav
             if chunk_part.exists():

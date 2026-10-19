@@ -243,12 +243,25 @@ class ValidationService:
             )
 
         # Load samples for waveform inspection
+        wav_temp_to_clean: Optional[Path] = None
         try:
-            data, sr = sf.read(str(file_path), always_2d=True)
+            try:
+                data, sr = sf.read(str(file_path), always_2d=True)
+            except Exception:
+                wav_temp = file_path.parent / f"transcoded_{file_path.stem}_{uuid.uuid4().hex[:8]}.wav"
+                AudioService.to_wav(file_path, wav_temp)
+                wav_temp_to_clean = wav_temp
+                data, sr = sf.read(str(wav_temp), always_2d=True)
             mono_data = np.mean(data, axis=1)
         except Exception as read_err:
             logging.error(f"Failed to read audio waveform for quality inspection: {read_err}")
             raise AudioCorruptError(f"Audio waveform decoding failed: {read_err}")
+        finally:
+            if wav_temp_to_clean and wav_temp_to_clean.exists():
+                try:
+                    wav_temp_to_clean.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         total_samples = len(mono_data)
         if total_samples == 0:
@@ -343,12 +356,25 @@ class ValidationService:
         logging.info(f"Executing ValidationService.check_reference_safety on {file_path.name}")
         meta = AudioService.probe_audio(file_path)
 
+        wav_temp_to_clean: Optional[Path] = None
         try:
-            data, sr = sf.read(str(file_path), always_2d=True)
+            try:
+                data, sr = sf.read(str(file_path), always_2d=True)
+            except Exception:
+                wav_temp = file_path.parent / f"transcoded_{file_path.stem}_{uuid.uuid4().hex[:8]}.wav"
+                AudioService.to_wav(file_path, wav_temp)
+                wav_temp_to_clean = wav_temp
+                data, sr = sf.read(str(wav_temp), always_2d=True)
             mono_data = np.mean(data, axis=1)
         except Exception as read_err:
             logging.error(f"Failed to read audio waveform for safety check: {read_err}")
             raise AudioCorruptError(f"Audio waveform decoding failed: {read_err}")
+        finally:
+            if wav_temp_to_clean and wav_temp_to_clean.exists():
+                try:
+                    wav_temp_to_clean.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         total_samples = len(mono_data)
         if total_samples == 0:

@@ -530,6 +530,38 @@ def test_chatterbox_service_availability_check(monkeypatch, temp_audio_dir: Path
     assert service_good.is_available() is True
 
 
+def test_reference_safety_check_transcoding_fallback(temp_audio_dir: Path) -> None:
+    """
+    Verify ValidationService decodes non-WAV audio formats (e.g., MP3/compressed)
+    transparently via AudioService.to_wav fallback.
+    """
+    sr = 22050
+    # Clean speech-like audio
+    burst = 0.3 * np.sin(2 * np.pi * 200 * np.linspace(0, 0.6, int(sr * 0.6)))
+    pause = np.zeros(int(sr * 0.3))
+    pattern = np.concatenate([burst, pause] * 10)
+
+    wav_path = temp_audio_dir / "clean_source.wav"
+    mp3_path = temp_audio_dir / "clean_source.mp3"
+    sf.write(str(wav_path), pattern, sr)
+
+    # Convert to MP3
+    AudioService.export_mp3(wav_path, mp3_path)
+    assert mp3_path.exists()
+
+    # 1. check_reference_safety on MP3 must succeed via transcode fallback
+    res = ValidationService.check_reference_safety(mp3_path)
+    assert res["score"] > 50
+    assert res["is_usable"] is True
+    assert res["metrics"]["speech_length_s"] > 3.0
+
+    # 2. inspect_reference_audio_quality on MP3 must also succeed
+    quality = ValidationService.inspect_reference_audio_quality(mp3_path, min_duration=3.0)
+    assert quality.quality_score > 0.5
+    assert quality.duration_seconds > 3.0
+
+
+
 
 
 

@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { Voice, PublicConfigResponse, JobStatusResponse, ReferenceCheckResponse } from '../../lib/types';
+import {
+  countWordsAccurately,
+  estimateSpeechDuration,
+  formatDuration,
+} from '../../lib/types';
+import type {
+  Voice,
+  PublicConfigResponse,
+  JobStatusResponse,
+  ReferenceCheckResponse,
+} from '../../lib/types';
 import { api } from '../../lib/api';
 import { Stepper } from '../navigation/Stepper';
 import { Drawer } from '../navigation/Drawer';
@@ -14,6 +24,13 @@ export interface TTSWizardProps {
   onJobCreated?: (job: JobStatusResponse) => void;
   onNavigateHome: () => void;
 }
+
+// Ready-to-use sample scripts for rapid testing
+const SAMPLE_SCRIPTS: Record<string, string> = {
+  hi: 'नमस्ते! AI Voice Studio में आपका स्वागत है। यह एक उच्च गुणवत्ता वाली बहुभाषी स्पीच सिंथेसिस प्रणाली है, जो आपकी आवाज़ को हूबहू प्रस्तुत करती है।',
+  mr: 'नमस्कार! AI Voice Studio मध्ये आपले स्वागत आहे. ही प्रणाली मराठी, हिंदी आणि इंग्रजी भाषेत अचूक आणि नैसर्गिक आवाजात संवाद साधण्यासाठी सक्षम आहे.',
+  en: 'Welcome to AI Voice Studio. This advanced neural voice cloning studio generates natural, expressive speech with studio-grade fidelity across multiple languages.',
+};
 
 export const TTSWizard: React.FC<TTSWizardProps> = ({
   voices,
@@ -47,6 +64,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
   const [referenceAudioUrl, setReferenceAudioUrl] = useState<string | null>(null);
   const [consent, setConsent] = useState<boolean>(false);
   const [referenceCheckResult, setReferenceCheckResult] = useState<ReferenceCheckResponse | null>(null);
+  const [referenceCheckError, setReferenceCheckError] = useState<string | null>(null);
   const [isCheckingReference, setIsCheckingReference] = useState<boolean>(false);
 
   // Script Check Drawer State
@@ -72,6 +90,16 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
   const [fullAudioError, setFullAudioError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const referenceUrlRef = useRef<string | null>(null);
+
+  // Revoke object URLs on unmount
+  useEffect(() => {
+    return () => {
+      if (referenceUrlRef.current) {
+        URL.revokeObjectURL(referenceUrlRef.current);
+      }
+    };
+  }, []);
 
   // Sync step and job_id to URL
   useEffect(() => {
@@ -157,20 +185,20 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
     return () => clearInterval(interval);
   }, [previewJobId, isPreviewGenerating]);
 
-  // Script text measurements
-  const charCount = script.length;
-  const wordCount = script.trim() ? script.trim().split(/\s+/).length : 0;
+  // Accurate text measurements
+  const charCount = Array.from(script).length;
+  const wordCount = countWordsAccurately(script);
   const maxChars = config?.max_text_chars || 30000;
-  const estimatedSeconds = Math.max(1, Math.round(charCount * 0.065));
+  const estimatedSeconds = estimateSpeechDuration(wordCount, charCount, language);
   const measuredComputeRatio = config?.seconds_per_audio_second || 0.8;
   const estimatedComputeTime = Math.max(2, Math.round(estimatedSeconds * measuredComputeRatio));
 
   // Step validation
   const getStepValidation = (): { isValid: boolean; reason: string } => {
     if (currentStep === 1) {
-      if (charCount === 0) return { isValid: false, reason: 'Enter your script text to continue' };
+      if (charCount === 0) return { isValid: false, reason: 'Enter or paste script text to continue' };
       if (charCount < 5) return { isValid: false, reason: 'Script must be at least 5 characters' };
-      if (charCount > maxChars) return { isValid: false, reason: `Script exceeds ${maxChars} character limit` };
+      if (charCount > maxChars) return { isValid: false, reason: `Script exceeds ${maxChars.toLocaleString()} character limit` };
       return { isValid: true, reason: '' };
     }
     if (currentStep === 2) {
@@ -182,7 +210,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
         return { isValid: false, reason: 'Upload or record reference audio' };
       }
       if (!consent) {
-        return { isValid: false, reason: 'Please check the consent box to proceed' };
+        return { isValid: false, reason: 'Please confirm voice authorization consent to proceed' };
       }
       return { isValid: true, reason: '' };
     }
@@ -274,23 +302,36 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
   // Reference Audio Handler
   const handleReferenceReady = async (file: File) => {
     setReferenceFile(file);
+    if (referenceUrlRef.current) {
+      URL.revokeObjectURL(referenceUrlRef.current);
+    }
     const url = URL.createObjectURL(file);
+    referenceUrlRef.current = url;
     setReferenceAudioUrl(url);
+    setReferenceCheckError(null);
+    setReferenceCheckResult(null);
 
     setIsCheckingReference(true);
     try {
       const result = await api.checkReferenceAudio({ file });
       setReferenceCheckResult(result);
-    } catch {
-      setReferenceCheckResult({
-        score: 75,
-        is_usable: true,
-        advice: ['Reference audio accepted for synthesis.'],
-        metrics: {} as any,
-      });
+    } catch (err: any) {
+      setReferenceCheckResult(null);
+      setReferenceCheckError(err?.message || 'Acoustic validation failed. Audio may be too short or unreadable.');
     } finally {
       setIsCheckingReference(false);
     }
+  };
+
+  const handleClearReference = () => {
+    if (referenceUrlRef.current) {
+      URL.revokeObjectURL(referenceUrlRef.current);
+      referenceUrlRef.current = null;
+    }
+    setReferenceFile(null);
+    setReferenceAudioUrl(null);
+    setReferenceCheckResult(null);
+    setReferenceCheckError(null);
   };
 
   // Generate Preview
@@ -403,7 +444,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
           overflow: 'hidden',
         }}
       >
-        {/* STEP 1: SCRIPT */}
+        {/* STEP 1: SCRIPT EDITOR */}
         {currentStep === 1 && (
           <div
             className="slide-panel"
@@ -413,124 +454,257 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
               height: '100%',
               padding: 'var(--space-2)',
               gap: 'var(--space-2)',
+              boxSizing: 'border-box',
             }}
           >
-            {/* Left: Textarea fills available height (inner scroll) */}
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%' }}>
-              <textarea
-                value={script}
-                onChange={(e) => setScript(e.target.value)}
-                placeholder="Type or paste your script here (up to 30,000 characters)..."
-                className="inner-scroll"
-                aria-label="Script text"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  resize: 'none',
-                  padding: 'var(--space-2)',
-                  fontFamily: 'var(--font-sans)',
-                  fontSize: 'var(--font-base)',
-                  lineHeight: 1.5,
-                  color: 'var(--color-text-primary)',
-                  backgroundColor: 'var(--color-bg)',
-                  border: '1px solid var(--color-border)',
-                  borderRadius: 'var(--radius-control)',
-                  outline: 'none',
-                }}
-              />
-            </div>
-
-            {/* Right: Narrow Column Controls */}
+            {/* Left: Script Editor Card (Primary) */}
             <div
               style={{
-                width: 'min(240px, 32vw)',
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                height: '100%',
+                backgroundColor: 'var(--color-surface)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 'var(--radius-control)',
+                overflow: 'hidden',
+              }}
+            >
+              {/* Card Header Toolbar */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '8px 12px',
+                  backgroundColor: 'var(--color-surface-muted)',
+                  borderBottom: '1px solid var(--color-border)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: 'var(--font-sm)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                    Script Editor
+                  </span>
+                  <span style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>
+                    (Hindi • Marathi • English)
+                  </span>
+                </div>
+
+                {/* Actions & Samples */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  {/* Sample Insert Buttons */}
+                  <div style={{ display: 'flex', gap: '3px', alignItems: 'center' }}>
+                    <span style={{ fontSize: '11px', color: 'var(--color-text-muted)', marginRight: '2px' }}>
+                      Sample:
+                    </span>
+                    {(['hi', 'mr', 'en'] as const).map((langKey) => (
+                      <button
+                        key={langKey}
+                        type="button"
+                        onClick={() => {
+                          setScript(SAMPLE_SCRIPTS[langKey]);
+                          setLanguage(langKey);
+                        }}
+                        style={{
+                          fontSize: '11px',
+                          padding: '2px 6px',
+                          borderRadius: 'var(--radius-control)',
+                          border: '1px solid var(--color-border)',
+                          backgroundColor: language === langKey ? 'var(--color-accent-light)' : 'var(--color-surface)',
+                          color: language === langKey ? 'var(--color-accent)' : 'var(--color-text-secondary)',
+                          cursor: 'pointer',
+                          fontWeight: language === langKey ? 600 : 400,
+                        }}
+                      >
+                        {langKey.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+
+                  {script && (
+                    <button
+                      type="button"
+                      onClick={() => setScript('')}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--color-text-muted)',
+                        cursor: 'pointer',
+                        fontSize: '11px',
+                        padding: '2px 6px',
+                        textDecoration: 'underline',
+                      }}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Textarea Area */}
+              <div style={{ flex: 1, position: 'relative' }}>
+                <textarea
+                  value={script}
+                  onChange={(e) => setScript(e.target.value)}
+                  placeholder="Enter or paste your script in Hindi, Marathi, or English (e.g., नमस्ते! AI Voice Studio में आपका स्वागत है)..."
+                  className="inner-scroll"
+                  aria-label="Script text content"
+                  style={{
+                    width: '100%',
+                    height: '100%',
+                    resize: 'none',
+                    padding: '14px 16px',
+                    fontFamily: "'Plus Jakarta Sans', 'Noto Sans Devanagari', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+                    fontSize: '15px',
+                    lineHeight: 1.65,
+                    color: 'var(--color-text-primary)',
+                    backgroundColor: 'transparent',
+                    border: 'none',
+                    outline: 'none',
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Right: Configuration & Metrics Panel */}
+            <div
+              style={{
+                width: 'min(280px, 35vw)',
                 display: 'flex',
                 flexDirection: 'column',
                 justifyContent: 'space-between',
                 flexShrink: 0,
-                gap: 'var(--space-1)',
+                gap: 'var(--space-2)',
               }}
             >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
-                {/* Language Select */}
-                <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  <span style={{ fontSize: 'var(--font-sm)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
-                    Language
-                  </span>
-                  <select
-                    value={language}
-                    onChange={(e) => setLanguage(e.target.value)}
-                    style={{
-                      height: '44px',
-                      padding: '0 var(--space-1)',
-                      borderRadius: 'var(--radius-control)',
-                      border: '1px solid var(--color-border)',
-                      backgroundColor: 'var(--color-surface)',
-                      fontFamily: 'var(--font-sans)',
-                      fontSize: 'var(--font-base)',
-                      color: 'var(--color-text-primary)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <option value="hi">Hindi (Default)</option>
-                    <option value="en">English</option>
-                  </select>
-                </label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+                {/* Language Card */}
+                <div
+                  style={{
+                    backgroundColor: 'var(--color-surface)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius-control)',
+                    padding: 'var(--space-1) var(--space-2)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: 'var(--font-sm)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
+                        Target Language
+                      </span>
+                      <span style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>
+                        {language === 'en' ? '~150 WPM' : language === 'mr' ? '~125 WPM' : '~130 WPM'}
+                      </span>
+                    </div>
 
-                {/* Script Metrics */}
+                    <select
+                      value={language}
+                      onChange={(e) => setLanguage(e.target.value)}
+                      style={{
+                        height: '38px',
+                        padding: '0 8px',
+                        borderRadius: 'var(--radius-control)',
+                        border: '1px solid var(--color-border)',
+                        backgroundColor: 'var(--color-surface)',
+                        fontFamily: 'var(--font-sans)',
+                        fontSize: 'var(--font-sm)',
+                        color: 'var(--color-text-primary)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <option value="hi">Hindi (हिन्दी)</option>
+                      <option value="mr">Marathi (मराठी)</option>
+                      <option value="en">English (English)</option>
+                    </select>
+                  </label>
+                  <span style={{ fontSize: '11px', color: 'var(--color-text-muted)', lineHeight: 1.3 }}>
+                    Speech cadence calibrated for conversational natural pacing.
+                  </span>
+                </div>
+
+                {/* Metrics Card */}
                 <div
                   style={{
                     backgroundColor: 'var(--color-surface-muted)',
                     border: '1px solid var(--color-border)',
                     borderRadius: 'var(--radius-control)',
-                    padding: 'var(--space-1)',
+                    padding: 'var(--space-1) var(--space-2)',
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: '4px',
+                    gap: '8px',
                   }}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-sm)' }}>
-                    <span style={{ color: 'var(--color-text-muted)' }}>Characters</span>
-                    <span style={{ fontWeight: 600 }}>{charCount.toLocaleString()} / {maxChars.toLocaleString()}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-sm)' }}>
-                    <span style={{ color: 'var(--color-text-muted)' }}>Words</span>
-                    <span style={{ fontWeight: 600 }}>{wordCount.toLocaleString()}</span>
-                  </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-sm)' }}>
-                    <span style={{ color: 'var(--color-text-muted)' }}>Est. Audio</span>
-                    <span style={{ fontWeight: 600 }}>~{estimatedSeconds}s</span>
-                  </div>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--color-text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    Live Text Measurements
+                  </span>
 
-                  {/* Limit Bar */}
-                  <div
-                    style={{
-                      height: '4px',
-                      width: '100%',
-                      backgroundColor: 'var(--color-border)',
-                      borderRadius: '2px',
-                      overflow: 'hidden',
-                      marginTop: '4px',
-                    }}
-                  >
+                  {/* Characters Stat */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-sm)' }}>
+                      <span style={{ color: 'var(--color-text-secondary)' }}>Characters</span>
+                      <span
+                        style={{
+                          fontWeight: 600,
+                          color: charCount > maxChars ? 'var(--color-error)' : 'var(--color-text-primary)',
+                        }}
+                      >
+                        {charCount.toLocaleString()} / {maxChars.toLocaleString()}
+                      </span>
+                    </div>
+
+                    {/* Character Capacity Bar */}
                     <div
                       style={{
-                        height: '100%',
-                        width: `${Math.min(100, (charCount / maxChars) * 100)}%`,
-                        backgroundColor: charCount > maxChars ? 'var(--color-error)' : 'var(--color-accent)',
+                        height: '4px',
+                        width: '100%',
+                        backgroundColor: 'var(--color-border)',
+                        borderRadius: '2px',
+                        overflow: 'hidden',
                       }}
-                    />
+                    >
+                      <div
+                        style={{
+                          height: '100%',
+                          width: `${Math.min(100, (charCount / maxChars) * 100)}%`,
+                          backgroundColor:
+                            charCount > maxChars
+                              ? 'var(--color-error)'
+                              : charCount > maxChars * 0.9
+                              ? 'var(--color-warning)'
+                              : 'var(--color-accent)',
+                          transition: 'width 150ms ease',
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Words Stat */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-sm)' }}>
+                    <span style={{ color: 'var(--color-text-secondary)' }}>Word Count</span>
+                    <span style={{ fontWeight: 600 }}>{wordCount.toLocaleString()}</span>
+                  </div>
+
+                  {/* Duration Stat */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 'var(--font-sm)', borderTop: '1px solid var(--color-border)', paddingTop: '6px' }}>
+                    <span style={{ color: 'var(--color-text-secondary)' }}>Est. Duration</span>
+                    <span style={{ fontWeight: 600, color: 'var(--color-accent)' }}>
+                      {formatDuration(estimatedSeconds)} <span style={{ fontSize: '10px', color: 'var(--color-text-muted)', fontWeight: 400 }}>(est.)</span>
+                    </span>
                   </div>
                 </div>
 
-                {/* Upload .txt */}
+                {/* File Upload Button */}
                 <Button
                   size="sm"
                   variant="secondary"
                   onClick={() => fileInputRef.current?.click()}
                   style={{ width: '100%' }}
                 >
-                  📄 Upload .txt
+                  📄 Upload text file (.txt)
                 </Button>
                 <input
                   ref={fileInputRef}
@@ -541,7 +715,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                 />
               </div>
 
-              {/* Script Check Button with Issue Count Badge */}
+              {/* Script Check Button */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
                 <Button
                   size="base"
@@ -550,7 +724,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                   disabled={charCount === 0 || isCheckingScript}
                   style={{ width: '100%', position: 'relative' }}
                 >
-                  <span>Script check</span>
+                  <span>Script check & normalize</span>
                   {scriptCheckIssuesCount > 0 && (
                     <span
                       style={{
@@ -568,12 +742,15 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                     </span>
                   )}
                 </Button>
+                <span style={{ fontSize: '11px', color: 'var(--color-text-muted)', textAlign: 'center', lineHeight: 1.25 }}>
+                  Expands digits, acronyms, and punctuation for cleaner synthesis.
+                </span>
               </div>
             </div>
           </div>
         )}
 
-        {/* STEP 2: VOICE */}
+        {/* STEP 2: VOICE SELECTION & REFERENCE AUDIO */}
         {currentStep === 2 && (
           <div
             className="slide-panel"
@@ -583,59 +760,74 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
               height: '100%',
               padding: 'var(--space-2)',
               gap: 'var(--space-2)',
+              boxSizing: 'border-box',
             }}
           >
-            {/* Segmented Control */}
+            {/* Header: Segmented Toggle Control */}
             <div
               style={{
-                display: 'inline-flex',
-                backgroundColor: 'var(--color-surface-muted)',
-                padding: '3px',
-                borderRadius: 'var(--radius-control)',
-                border: '1px solid var(--color-border)',
-                width: 'fit-content',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                paddingBottom: '4px',
               }}
             >
-              <button
-                type="button"
-                onClick={() => setVoiceMode('saved')}
-                className="touch-target"
+              <div
                 style={{
-                  border: 'none',
-                  padding: '6px 16px',
+                  display: 'inline-flex',
+                  backgroundColor: 'var(--color-surface-muted)',
+                  padding: '3px',
                   borderRadius: 'var(--radius-control)',
-                  backgroundColor: voiceMode === 'saved' ? 'var(--color-surface)' : 'transparent',
-                  color: voiceMode === 'saved' ? 'var(--color-accent)' : 'var(--color-text-secondary)',
-                  fontWeight: voiceMode === 'saved' ? 600 : 500,
-                  fontSize: 'var(--font-base)',
-                  boxShadow: voiceMode === 'saved' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
-                  cursor: 'pointer',
+                  border: '1px solid var(--color-border)',
                 }}
               >
-                Saved voice
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setVoiceMode('saved')}
+                  className="touch-target"
+                  style={{
+                    border: 'none',
+                    padding: '6px 16px',
+                    borderRadius: 'var(--radius-control)',
+                    backgroundColor: voiceMode === 'saved' ? 'var(--color-surface)' : 'transparent',
+                    color: voiceMode === 'saved' ? 'var(--color-accent)' : 'var(--color-text-secondary)',
+                    fontWeight: voiceMode === 'saved' ? 600 : 500,
+                    fontSize: 'var(--font-base)',
+                    boxShadow: voiceMode === 'saved' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Saved Studio Voice ({voices.length})
+                </button>
 
-              <button
-                type="button"
-                onClick={() => setVoiceMode('reference')}
-                className="touch-target"
-                style={{
-                  border: 'none',
-                  padding: '6px 16px',
-                  borderRadius: 'var(--radius-control)',
-                  backgroundColor: voiceMode === 'reference' ? 'var(--color-surface)' : 'transparent',
-                  color: voiceMode === 'reference' ? 'var(--color-accent)' : 'var(--color-text-secondary)',
-                  fontWeight: voiceMode === 'reference' ? 600 : 500,
-                  fontSize: 'var(--font-base)',
-                  boxShadow: voiceMode === 'reference' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
-                  cursor: 'pointer',
-                }}
-              >
-                My reference
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setVoiceMode('reference')}
+                  className="touch-target"
+                  style={{
+                    border: 'none',
+                    padding: '6px 16px',
+                    borderRadius: 'var(--radius-control)',
+                    backgroundColor: voiceMode === 'reference' ? 'var(--color-surface)' : 'transparent',
+                    color: voiceMode === 'reference' ? 'var(--color-accent)' : 'var(--color-text-secondary)',
+                    fontWeight: voiceMode === 'reference' ? 600 : 500,
+                    fontSize: 'var(--font-base)',
+                    boxShadow: voiceMode === 'reference' ? '0 1px 2px rgba(0,0,0,0.06)' : 'none',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Custom Reference Audio
+                </button>
+              </div>
+
+              <span style={{ fontSize: '11px', color: 'var(--color-text-muted)' }}>
+                {voiceMode === 'saved'
+                  ? 'Pre-verified studio voice profile'
+                  : 'Zero-shot voice cloning from microphone or uploaded file'}
+              </span>
             </div>
 
-            {/* Saved Voices Row (Inner scroll) */}
+            {/* Saved Voices View */}
             {voiceMode === 'saved' ? (
               <div
                 className="inner-scroll-x"
@@ -654,8 +846,8 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                       key={v.id}
                       onClick={() => setSelectedVoiceId(v.id)}
                       style={{
-                        minWidth: '220px',
-                        maxWidth: '260px',
+                        minWidth: '240px',
+                        maxWidth: '280px',
                         padding: 'var(--space-2)',
                         borderRadius: 'var(--radius-control)',
                         border: `2px solid ${isSelected ? 'var(--color-accent)' : 'var(--color-border)'}`,
@@ -666,16 +858,63 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                         gap: 'var(--space-1)',
                         cursor: 'pointer',
                         flexShrink: 0,
+                        transition: 'border-color 150ms ease, background-color 150ms ease',
                       }}
                     >
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                           <span style={{ fontSize: 'var(--font-base)', fontWeight: 600, color: 'var(--color-text-primary)' }}>
                             {v.name}
                           </span>
-                          {isSelected && <span style={{ color: 'var(--color-accent)', fontWeight: 700 }}>✓</span>}
+                          {isSelected && (
+                            <span
+                              style={{
+                                fontSize: '11px',
+                                fontWeight: 700,
+                                color: 'var(--color-accent)',
+                                backgroundColor: '#ffffff',
+                                padding: '1px 6px',
+                                borderRadius: '10px',
+                                border: '1px solid var(--color-accent-border)',
+                              }}
+                            >
+                              Selected ✓
+                            </span>
+                          )}
                         </div>
-                        <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.3 }}>
+
+                        {/* Language Badges */}
+                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                          {(v.languages || ['hi', 'en']).map((lang) => (
+                            <span
+                              key={lang}
+                              style={{
+                                fontSize: '10px',
+                                padding: '1px 5px',
+                                borderRadius: '4px',
+                                backgroundColor: 'var(--color-surface-muted)',
+                                color: 'var(--color-text-secondary)',
+                                fontWeight: 600,
+                                textTransform: 'uppercase',
+                              }}
+                            >
+                              {lang}
+                            </span>
+                          ))}
+                          <span
+                            style={{
+                              fontSize: '10px',
+                              padding: '1px 5px',
+                              borderRadius: '4px',
+                              backgroundColor: 'var(--color-neutral-pill-bg)',
+                              color: 'var(--color-neutral-pill-text)',
+                            }}
+                          >
+                            {v.style || 'Conversational'}
+                          </span>
+                        </div>
+
+                        <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)', lineHeight: 1.35 }}>
                           {v.description || 'Natural speech voice profile.'}
                         </p>
                       </div>
@@ -685,6 +924,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                         <div style={{ marginTop: 'var(--space-1)' }} onClick={(e) => e.stopPropagation()}>
                           <AudioPlayer
                             src={api.getVoicePreviewUrl(v.id)}
+                            title="Sample Voice Preview"
                             compact
                           />
                         </div>
@@ -694,15 +934,19 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                 })}
               </div>
             ) : (
-              /* My Reference: Upload / Record in two columns (No scroll) */
-              <div style={{ flex: 1 }}>
+              /* Custom Reference: Microphone Recording & File Upload */
+              <div style={{ flex: 1, minHeight: 0 }}>
                 <AudioRecorder
                   onReferenceReady={handleReferenceReady}
                   referenceAudioUrl={referenceAudioUrl}
+                  referenceFile={referenceFile}
                   consent={consent}
                   onConsentChange={setConsent}
                   checkResult={referenceCheckResult}
                   isChecking={isCheckingReference}
+                  checkError={referenceCheckError}
+                  onRetryCheck={() => referenceFile && handleReferenceReady(referenceFile)}
+                  onClearReference={handleClearReference}
                 />
               </div>
             )}
@@ -720,30 +964,29 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
               padding: 'var(--space-2)',
               gap: 'var(--space-2)',
               justifyContent: 'space-between',
+              boxSizing: 'border-box',
             }}
           >
             {/* Top: Script preview & Voice Selection info */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>Preview 15 seconds</span>
+                <span style={{ fontSize: 'var(--font-base)', fontWeight: 600 }}>Preview Audio (First ~200 Characters)</span>
                 <span style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-muted)' }}>
-                  Selected voice: <strong>{voiceMode === 'saved' ? activeVoice?.name || 'Saved voice' : 'My reference'}</strong>
+                  Selected voice: <strong>{voiceMode === 'saved' ? activeVoice?.name || 'Saved voice' : 'Custom reference'}</strong>
                 </span>
               </div>
-
-              {/* First 200 Chars */}
               <div
                 style={{
-                  padding: 'var(--space-2)',
+                  padding: 'var(--space-1) var(--space-2)',
                   backgroundColor: 'var(--color-surface-muted)',
                   border: '1px solid var(--color-border)',
                   borderRadius: 'var(--radius-control)',
-                  fontSize: 'var(--font-base)',
+                  fontSize: 'var(--font-sm)',
                   color: 'var(--color-text-secondary)',
-                  lineHeight: 1.4,
+                  fontStyle: 'italic',
                 }}
               >
-                "{script.trim().slice(0, 200)}..."
+                &ldquo;{script.trim().slice(0, 200)}...&rdquo;
               </div>
             </div>
 
@@ -854,6 +1097,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
               padding: 'var(--space-2)',
               gap: 'var(--space-2)',
               justifyContent: 'space-between',
+              boxSizing: 'border-box',
             }}
           >
             {/* Top: Summary */}
@@ -869,7 +1113,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
               }}
             >
               <span style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-secondary)' }}>
-                Characters: <strong>{charCount.toLocaleString()}</strong> | Est. Duration: <strong>~{estimatedSeconds}s</strong>
+                Characters: <strong>{charCount.toLocaleString()}</strong> | Words: <strong>{wordCount.toLocaleString()}</strong> | Est. Duration: <strong>{formatDuration(estimatedSeconds)}</strong>
               </span>
               <span style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-muted)' }}>
                 Est. Generation Time: <strong>~{estimatedComputeTime}s</strong>
