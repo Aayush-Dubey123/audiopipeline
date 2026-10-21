@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: audiopipeline-backend:v1
+    container_name: audiopipeline-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENV=production
+      - DEBUG=false
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost:80
+      - DATABASE_URL=sqlite:///./storage/voice_studio.db
+      - TMP_DIR=storage/tmp
+      - VOICES_DIR=voices
+      - CHATTERBOX_IN_PROCESS=true
+      - EXPOSE_EXPERIMENTAL_VOICES=false
+      - CLIENT_DAILY_MINUTES=120
+      - RATE_LIMIT_PER_MINUTE=10
+    volumes:
+      - audio_storage:/app/backend/storage
+      - voice_assets:/app/backend/voices
+      - hf_cache:/home/appuser/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: audiopipeline-frontend:v1
+    container_name: audiopipeline-ui
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  audio_storage:
+    name: audiopipeline_storage
+  voice_assets:
+    name: audiopipeline_voices
+  hf_cache:
+    name: audiopipeline_hf_cache

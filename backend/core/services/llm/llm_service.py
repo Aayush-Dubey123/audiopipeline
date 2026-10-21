@@ -100,8 +100,79 @@ class LLMService:
             for pattern, replacement in COMMON_ENGLISH_ABBREVIATIONS.items():
                 cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
 
+            # Month abbreviations
+            month_map = {
+                r"\bJan\.\s*": "January ",
+                r"\bFeb\.\s*": "February ",
+                r"\bMar\.\s*": "March ",
+                r"\bApr\.\s*": "April ",
+                r"\bAug\.\s*": "August ",
+                r"\bSept?\.\s*": "September ",
+                r"\bOct\.\s*": "October ",
+                r"\bNov\.\s*": "November ",
+                r"\bDec\.\s*": "December ",
+            }
+            for pat, rep in month_map.items():
+                cleaned = re.sub(pat, rep, cleaned, flags=re.IGNORECASE)
+
+            # Currency mapping ($5.00 -> 5.00 dollars)
             for pattern, replacement in CURRENCY_MAP.items():
                 cleaned = re.sub(pattern, replacement, cleaned)
+
+            # Time: 3:30 PM -> 3 30 P M
+            cleaned = re.sub(
+                r"\b([0-1]?[0-9]):([0-5][0-9])\s*(am|pm|AM|PM)\b",
+                r"\1 \2 \3",
+                cleaned,
+            )
+            cleaned = re.sub(r"\bPM\b", "P M", cleaned)
+            cleaned = re.sub(r"\bAM\b", "A M", cleaned)
+
+            # Ordinals (1st, 2nd, 3rd, 15th)
+            ordinal_dict = {
+                r"\b1st\b": "first",
+                r"\b2nd\b": "second",
+                r"\b3rd\b": "third",
+                r"\b4th\b": "fourth",
+                r"\b5th\b": "fifth",
+                r"\b6th\b": "sixth",
+                r"\b7th\b": "seventh",
+                r"\b8th\b": "eighth",
+                r"\b9th\b": "ninth",
+                r"\b10th\b": "tenth",
+                r"\b11th\b": "eleventh",
+                r"\b12th\b": "twelfth",
+                r"\b13th\b": "thirteenth",
+                r"\b14th\b": "fourteenth",
+                r"\b15th\b": "fifteenth",
+                r"\b16th\b": "sixteenth",
+                r"\b17th\b": "seventeenth",
+                r"\b18th\b": "eighteenth",
+                r"\b19th\b": "nineteenth",
+                r"\b20th\b": "twentieth",
+                r"\b21st\b": "twenty-first",
+                r"\b22nd\b": "twenty-second",
+                r"\b23rd\b": "twenty-third",
+                r"\b30th\b": "thirtieth",
+                r"\b31st\b": "thirty-first",
+            }
+            for pat, rep in ordinal_dict.items():
+                cleaned = re.sub(pat, rep, cleaned, flags=re.IGNORECASE)
+
+            # Common acronyms spelled out for natural prosody
+            acronym_map = {
+                r"\bAI\b": "A I",
+                r"\bTTS\b": "T T S",
+                r"\bAPI\b": "A P I",
+                r"\bGPU\b": "G P U",
+                r"\bCPU\b": "C P U",
+                r"\bV1\b": "V one",
+                r"\bV2\b": "V two",
+                r"\bURL\b": "U R L",
+                r"\bID\b": "I D",
+            }
+            for pat, rep in acronym_map.items():
+                cleaned = re.sub(pat, rep, cleaned)
 
             cleaned = cleaned.replace("&", " and ")
             cleaned = cleaned.replace("%", " percent ")
@@ -113,8 +184,11 @@ class LLMService:
             for d_idx, d_char in enumerate(devanagari_digits):
                 cleaned = cleaned.replace(d_char, str(d_idx))
 
-        # 6. Normalize extraneous whitespace
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        # 6. Normalize extraneous whitespace while preserving paragraph breaks
+        cleaned = re.sub(r"[^\S\r\n]+", " ", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = "\n".join(line.strip() for line in cleaned.splitlines())
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
         return cleaned
 
     @classmethod

@@ -52,8 +52,25 @@ def synthesize(
     t0 = time.perf_counter()
     model = ChatterboxMultilingualTTS.from_pretrained(device=device)
 
-    # Prepare speaker conditioning from reference audio
-    model.prepare_conditionals(ref_path, exaggeration=exaggeration)
+    # Prepare speaker conditioning from reference audio (with disk caching)
+    import hashlib
+    from pathlib import Path
+    from chatterbox.mtl_tts import Conditionals
+
+    ref_bytes = Path(ref_path).read_bytes()
+    ref_hash = hashlib.sha256(ref_bytes).hexdigest()[:16]
+    cache_dir = Path("storage/tmp/cache/conditionals")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"{ref_hash}_{int(exaggeration * 100)}.pt"
+
+    if cache_file.exists():
+        model.conds = Conditionals.load(cache_file, map_location=device)
+    else:
+        model.prepare_conditionals(ref_path, exaggeration=exaggeration)
+        try:
+            model.conds.save(cache_file)
+        except Exception:
+            pass
 
     # Clean text
     clean_text = text.strip()
@@ -66,6 +83,11 @@ def synthesize(
         # Chatterbox Multilingual model supports Devanagari script (shared between Hindi and Marathi)
         # under the 'hi' acoustic grapheme vocabulary.
         model_lang = "hi"
+    elif model_lang == "en":
+        # Tuned natural prosody parameters for English
+        temperature = 0.7 if temperature == 0.6 else temperature
+        cfg_weight = 0.6 if cfg_weight == 0.7 else cfg_weight
+        exaggeration = 0.35 if exaggeration == 0.3 else exaggeration
 
     # Generate audio waveform
     wav = model.generate(

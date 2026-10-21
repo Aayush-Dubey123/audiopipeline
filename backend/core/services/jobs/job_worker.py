@@ -375,8 +375,10 @@ def _run_long_form_tts(
         f"Conditioning TTS job '{job_id}' on reference: hash='{ref_hash}', engine='chatterbox_multilingual', lang='{language}'"
     )
 
-    # 2. Split text into chunks respecting sentence and paragraph boundaries
-    chunks, para_boundaries = split_text_with_boundaries(text, max_chars=settings.CHUNK_MAX_CHARS)
+    # 2. Normalize text and split into chunks respecting sentence and paragraph boundaries
+    from core.services.llm.llm_service import LLMService
+    clean_text = LLMService.rule_based_cleanup(text, language=language)
+    chunks, para_boundaries = split_text_with_boundaries(clean_text, max_chars=settings.CHUNK_MAX_CHARS)
     if not chunks:
         raise RuntimeError("No valid text provided for synthesis.")
 
@@ -654,9 +656,12 @@ def production_inference_pipeline(
         from core.services.audio.audio_service import AudioService
         import shutil
 
-        text = (payload.get("text") or "")[:200]
+        raw_text = (payload.get("text") or "")[:200]
         language = payload.get("language", "hi")
         speed = float(payload.get("speed", 1.0))
+
+        from core.services.llm.llm_service import LLMService
+        text = LLMService.rule_based_cleanup(raw_text, language=language)
         # 1. Custom reference audio uploaded for this specific preview job takes precedence
         job_ref = job_dir / "reference.wav"
         if job_ref.exists() and job_ref.stat().st_size > 44:

@@ -909,7 +909,8 @@ class JobController:
         from datetime import datetime, timezone, timedelta
         from core.services.jobs.job_worker import job_worker
 
-        preview_text = request.text.strip()[:200]
+        from core.services.llm.llm_service import LLMService
+        preview_text = LLMService.rule_based_cleanup(request.text.strip()[:200], language=request.language or "hi")
         if not preview_text:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Text cannot be empty.")
 
@@ -1078,7 +1079,8 @@ class JobController:
                 detail="Explicit consent is required before generating speech conditioned on custom reference audio.",
             )
 
-        clean_text = text.strip()[:200]
+        from core.services.llm.llm_service import LLMService
+        clean_text = LLMService.rule_based_cleanup(text.strip()[:200], language=language or "hi")
         if not clean_text:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Text cannot be empty.")
 

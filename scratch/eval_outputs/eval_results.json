@@ -1,0 +1,17 @@
+[
+  {
+    "raw_text": "Wait... did you hear that? Yes, it worked; however, we should check the preview first!",
+    "normalized_text": "Wait... did you hear that? Yes, it worked; however, we should check the preview first!",
+    "latency_s": 69.325,
+    "engine_gen_time_s": 41.343,
+    "audio_duration_s": 5.08,
+    "sample_rate": 44100,
+    "peak_amplitude": 0.95,
+    "rms_level": 0.187,
+    "silence_percent": 3.9,
+    "clipped": false,
+    "output_path": "C:\\Users\\aayus\\universal\\scratch\\eval_outputs\\complex_punctuation.wav",
+    "id": "complex_punctuation",
+    "name": "Complex Punctuation & Pauses"
+  }
+]

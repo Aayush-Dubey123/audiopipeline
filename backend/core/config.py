@@ -90,6 +90,10 @@ class Settings(BaseSettings):
         default="",
         description="Path to python executable with chatterbox dependencies installed. If empty, checks backend/.venv_chatterbox or system environment",
     )
+    CHATTERBOX_IN_PROCESS: bool = Field(
+        default=True,
+        description="Run resident Chatterbox model in-process for low latency",
+    )
     TTS_CONFIDENCE_GOOD_THRESHOLD: float = Field(
         default=0.70,
         description="Speaker similarity threshold for 'good' confidence label",
