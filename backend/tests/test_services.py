@@ -134,8 +134,9 @@ def test_encoder_formats_and_tags(synthetic_tone_wav: Path, temp_audio_dir: Path
 
     mp3_meta = AudioService.probe_audio(mp3_path)
     mp3_small_meta = AudioService.probe_audio(mp3_small_path)
-    assert abs(mp3_meta.duration_seconds - wav_meta.duration_seconds) <= 0.050
-    assert abs(mp3_small_meta.duration_seconds - wav_meta.duration_seconds) <= 0.050
+    # MP3 frame size at 22050 Hz is 1152 samples (~52.2ms); encoder priming + padding can add up to ~80-100ms
+    assert abs(mp3_meta.duration_seconds - wav_meta.duration_seconds) <= 0.120
+    assert abs(mp3_small_meta.duration_seconds - wav_meta.duration_seconds) <= 0.120
     assert mp3_small_meta.channels == 1
 
     mp3_tags = AudioService.read_audio_tags(mp3_path)
