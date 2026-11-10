@@ -523,7 +523,10 @@ class JobController:
                 detail=f"Job '{job_id}' not found",
             )
 
-        output_url = f"/v1/audio/{job_id}/output" if job.status == "completed" else None
+        if job.kind in ("preview", "tts_preview"):
+            output_url = f"/v1/audio/preview/{job_id}" if job.status == "completed" else None
+        else:
+            output_url = f"/v1/audio/{job_id}/output" if job.status == "completed" else None
         src_dir = settings.tmp_path / job_id
         has_source = (src_dir / "source.wav").is_file() or (src_dir / "reference.wav").is_file()
         source_url = f"/v1/audio/{job_id}/source" if job.kind in ("vc", "tts_custom") and has_source else None
@@ -532,20 +535,32 @@ class JobController:
         confidence_label = None
         if job.status == "completed":
             job_dir = (settings.tmp_path / job_id).resolve()
-            wav_file = job_dir / "output.wav"
-            mp3_file = job_dir / "output.mp3"
-            output_files = {
-                "wav": {
-                    "url": f"/v1/audio/{job_id}/output?format=wav",
-                    "size_bytes": wav_file.stat().st_size if wav_file.is_file() else 0,
-                    "hint": "Master uncompressed audio for video editing",
-                },
-                "mp3": {
-                    "url": f"/v1/audio/{job_id}/output?format=mp3",
-                    "size_bytes": mp3_file.stat().st_size if mp3_file.is_file() else 0,
-                    "hint": "192 kbps MP3 ready for X / Instagram / YouTube uploads",
-                },
-            }
+            if job.kind in ("preview", "tts_preview"):
+                prev_file = job_dir / "preview.wav"
+                if not prev_file.is_file():
+                    prev_file = job_dir / "output.wav"
+                output_files = {
+                    "wav": {
+                        "url": f"/v1/audio/preview/{job_id}",
+                        "size_bytes": prev_file.stat().st_size if prev_file.is_file() else 0,
+                        "hint": "Generated preview audio sample",
+                    }
+                }
+            else:
+                wav_file = job_dir / "output.wav"
+                mp3_file = job_dir / "output.mp3"
+                output_files = {
+                    "wav": {
+                        "url": f"/v1/audio/{job_id}/output?format=wav",
+                        "size_bytes": wav_file.stat().st_size if wav_file.is_file() else 0,
+                        "hint": "Master uncompressed audio for video editing",
+                    },
+                    "mp3": {
+                        "url": f"/v1/audio/{job_id}/output?format=mp3",
+                        "size_bytes": mp3_file.stat().st_size if mp3_file.is_file() else 0,
+                        "hint": "192 kbps MP3 ready for X / Instagram / YouTube uploads",
+                    },
+                }
             if job.output_metadata and isinstance(job.output_metadata, dict):
                 confidence_label = job.output_metadata.get("confidence_label")
 
@@ -640,6 +655,8 @@ class JobController:
             )
 
         wav_path = job_dir / "output.wav"
+        if not wav_path.is_file() and (job_dir / "preview.wav").is_file():
+            wav_path = job_dir / "preview.wav"
         if not wav_path.is_file():
             logging.warning(f"Audio file missing on disk for completed job '{job_id}': {wav_path}")
             raise HTTPException(

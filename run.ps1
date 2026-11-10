@@ -5,8 +5,17 @@ Write-Host "========================================================" -Foregroun
 $Root = $PSScriptRoot
 if (-not $Root) { $Root = Get-Location }
 
-# 1. Start Backend Server
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$Root'; Write-Host '--- AudioPipeline Backend (FastAPI) ---' -ForegroundColor Green; .venv\Scripts\python.exe -m uvicorn core.apis.api:app --app-dir backend --host 127.0.0.1 --port 8000"
+# 1. Detect Python Executable
+$PythonExe = "$Root\.venv\Scripts\python.exe"
+if (-not (Test-Path $PythonExe)) {
+    $PythonExe = "$Root\backend\.venv\Scripts\python.exe"
+}
+if (-not (Test-Path $PythonExe)) {
+    $PythonExe = "python"
+}
+
+# 2. Start Backend Server
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$Root'; Write-Host '--- AudioPipeline Backend (FastAPI) ---' -ForegroundColor Green; & '$PythonExe' -m uvicorn core.apis.api:app --app-dir backend --host 127.0.0.1 --port 8000"
 
 # 2. Start Frontend Server
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$Root\frontend'; Write-Host '--- AudioPipeline Frontend (Vite/React) ---' -ForegroundColor Blue; npm run dev"

@@ -150,10 +150,12 @@ def test_get_voice_preview_streams_audio() -> None:
     preview_dir = settings.voices_path / "previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
     preview_path = preview_dir / "client_ref_preview.wav"
-    sr = 22050
-    t = np.linspace(0, 1.0, sr, endpoint=False)
-    tone = 0.5 * np.sin(2 * np.pi * 440 * t)
-    sf.write(str(preview_path), tone, sr)
+    already_existed = preview_path.exists()
+    if not already_existed:
+        sr = 22050
+        t = np.linspace(0, 1.0, sr, endpoint=False)
+        tone = 0.5 * np.sin(2 * np.pi * 440 * t)
+        sf.write(str(preview_path), tone, sr)
 
     try:
         with TestClient(app) as test_client:
@@ -162,7 +164,7 @@ def test_get_voice_preview_streams_audio() -> None:
             assert "audio/wav" in response.headers.get("Content-Type", "")
             assert len(response.content) > 1000
     finally:
-        if preview_path.exists():
+        if not already_existed and preview_path.exists():
             preview_path.unlink()
 
 

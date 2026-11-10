@@ -125,7 +125,7 @@ class ChatterboxService:
             res = subprocess.run(
                 [str(self.python_path), "-c", "import chatterbox"],
                 capture_output=True,
-                timeout=30,
+                timeout=60,
                 check=False,
             )
             return res.returncode == 0
