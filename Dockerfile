@@ -11,7 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PORT=8000
+    PORT=8000 \
+    HOST=0.0.0.0
 
 # Install Python 3.10, FFmpeg, and audio processing libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \

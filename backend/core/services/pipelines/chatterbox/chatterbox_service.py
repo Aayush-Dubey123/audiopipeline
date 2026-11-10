@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -44,7 +45,28 @@ class ChatterboxService:
 
     _resident_model: Optional[Any] = None
     _model_lock: threading.Lock = threading.Lock()
-    _conds_cache: Dict[str, Any] = {}
+    # Bounded LRU: each entry holds GPU tensors, so an unbounded dict leaks VRAM
+    _conds_cache: "OrderedDict[str, Any]" = OrderedDict()
+    _CONDS_MEMORY_MAX = 4
+
+    @staticmethod
+    def resolve_device() -> str:
+        """Pick the inference device from CHATTERBOX_DEVICE (auto | cuda | cpu)."""
+        import torch
+
+        pref = (getattr(settings, "CHATTERBOX_DEVICE", "auto") or "auto").lower().strip()
+        if pref == "cpu":
+            return "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        if pref == "cuda":
+            logging.warning("CHATTERBOX_DEVICE=cuda but CUDA is unavailable; falling back to CPU")
+        return "cpu"
+
+    @staticmethod
+    def conditionals_cache_dir() -> Path:
+        """Anchored under backend/storage/tmp regardless of the launch folder."""
+        return settings.tmp_path / "cache" / "conditionals"
 
     def __init__(
         self,
@@ -149,10 +171,9 @@ class ChatterboxService:
             if cls._resident_model is not None:
                 return cls._resident_model
 
-            import torch
             from chatterbox import ChatterboxMultilingualTTS
 
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = cls.resolve_device()
             logging.info(f"Loading resident ChatterboxMultilingualTTS on {device}")
             cls._resident_model = ChatterboxMultilingualTTS.from_pretrained(device=device)
             return cls._resident_model
@@ -184,10 +205,11 @@ class ChatterboxService:
 
         # 1. In-memory cache hit
         if cache_key in cls._conds_cache:
+            cls._conds_cache.move_to_end(cache_key)
             return cls._conds_cache[cache_key]
 
         # 2. Disk cache hit
-        cache_dir = Path(settings.TMP_DIR) / "cache" / "conditionals"
+        cache_dir = cls.conditionals_cache_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / f"{cache_key}.pt"
 
@@ -196,7 +218,11 @@ class ChatterboxService:
         if cache_file.exists():
             try:
                 conds = Conditionals.load(cache_file, map_location=device)
-                cls._conds_cache[cache_key] = conds
+                cls._remember_conds(cache_key, conds)
+                try:
+                    os.utime(cache_file)  # mark as recently used for the janitor's LRU trim
+                except OSError:
+                    pass
                 logging.info(f"Loaded speaker conditioning from disk cache: '{cache_file.name}'")
                 return conds
             except Exception as load_err:
@@ -206,7 +232,7 @@ class ChatterboxService:
         logging.info(f"Extracting new speaker conditioning for ref_hash='{ref_hash}'")
         model.prepare_conditionals(str(ref_path), exaggeration=exaggeration)
         conds = model.conds
-        cls._conds_cache[cache_key] = conds
+        cls._remember_conds(cache_key, conds)
         try:
             conds.save(cache_file)
             logging.info(f"Saved speaker conditioning to disk cache: '{cache_file.name}'")
@@ -214,6 +240,13 @@ class ChatterboxService:
             logging.warning(f"Failed to save conditionals cache to {cache_file}: {save_err}")
 
         return conds
+
+    @classmethod
+    def _remember_conds(cls, key: str, conds: Any) -> None:
+        cls._conds_cache[key] = conds
+        cls._conds_cache.move_to_end(key)
+        while len(cls._conds_cache) > cls._CONDS_MEMORY_MAX:
+            cls._conds_cache.popitem(last=False)
 
     @classmethod
     def _generate_in_process(
@@ -226,7 +259,7 @@ class ChatterboxService:
         temperature: float = 0.6,
         cfg_weight: float = 0.7,
         exaggeration: float = 0.3,
-        target_sample_rate: int = 44100,
+        target_sample_rate: Optional[int] = None,
     ) -> ChatterboxResult:
         """
         Synthesize speech directly in-process using the resident model and cached conditionals.
@@ -249,12 +282,13 @@ class ChatterboxService:
         import torchaudio
         import torchaudio.functional as AF
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        if device == "cuda":
-            torch.cuda.reset_peak_memory_stats()
-
+        target_sample_rate = int(target_sample_rate or settings.OUTPUT_SAMPLE_RATE)
         t0 = time.perf_counter()
         model = cls._get_resident_model()
+        device = str(getattr(model, "device", cls.resolve_device()))
+        device = "cuda" if device.startswith("cuda") else "cpu"
+        if device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
         conds = cls._get_or_load_conditionals(model, reference_audio_path, exaggeration, device)
         model.conds = conds
 
@@ -271,7 +305,8 @@ class ChatterboxService:
             cfg_weight = 0.6 if cfg_weight == 0.7 else cfg_weight
             exaggeration = 0.35 if exaggeration == 0.3 else exaggeration
 
-        with cls._model_lock:
+        with cls._model_lock, torch.inference_mode():
+            model.conds = conds
             wav = model.generate(
                 text=clean_text,
                 language_id=model_lang,
@@ -295,7 +330,10 @@ class ChatterboxService:
             wav = (wav / max_amp) * 0.95
 
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        torchaudio.save(output_path, wav, target_sample_rate)
+        torchaudio.save(output_path, wav.cpu(), target_sample_rate)
+        del wav
+        if device == "cuda":
+            torch.cuda.empty_cache()  # return activation memory between chunks
 
         return ChatterboxResult(
             output_path=str(output_path),
@@ -315,7 +353,7 @@ class ChatterboxService:
         temperature: float = 0.6,
         cfg_weight: float = 0.7,
         exaggeration: float = 0.3,
-        target_sample_rate: int = 44100,
+        target_sample_rate: Optional[int] = None,
         timeout_seconds: Optional[int] = None,
     ) -> ChatterboxResult:
         """
@@ -338,13 +376,13 @@ class ChatterboxService:
         """
         timeout = timeout_seconds or settings.CHUNK_TIMEOUT_SECONDS
 
+        target_sample_rate = int(target_sample_rate or settings.OUTPUT_SAMPLE_RATE)
         cmd = [
             str(self.python_path),
             str(self.worker_script),
             "--ref",
             str(reference_audio_path),
-            "--text",
-            text,
+            f"--text={text}",
             "--out",
             str(output_path),
             "--language",
@@ -357,6 +395,10 @@ class ChatterboxService:
             str(exaggeration),
             "--sample-rate",
             str(target_sample_rate),
+            "--device",
+            self.resolve_device(),
+            "--cache-dir",
+            str(self.conditionals_cache_dir()),
         ]
 
         t0 = time.perf_counter()
@@ -376,7 +418,7 @@ class ChatterboxService:
         if res.returncode != 0:
             err_msg = res.stderr.strip() or res.stdout.strip() or f"Exited with code {res.returncode}"
             logging.error(f"Error in ChatterboxService._generate_via_subprocess: {err_msg}")
-            raise RuntimeError(f"Chatterbox generation failed: {err_msg}")
+            raise RuntimeError("Chatterbox generation failed (see server log for details).")
 
         try:
             out_lines = [line.strip() for line in res.stdout.splitlines() if line.strip()]
@@ -415,7 +457,7 @@ class ChatterboxService:
         temperature: float = 0.6,
         cfg_weight: float = 0.7,
         exaggeration: float = 0.3,
-        target_sample_rate: int = 44100,
+        target_sample_rate: Optional[int] = None,
         timeout_seconds: Optional[int] = None,
     ) -> ChatterboxResult:
         """
@@ -442,6 +484,7 @@ class ChatterboxService:
             RuntimeError: If synthesis fails or output cannot be produced.
         """
         logging.info(f"Executing ChatterboxService.generate (text_len={len(text)}, lang={language})")
+        target_sample_rate = int(target_sample_rate or settings.OUTPUT_SAMPLE_RATE)
 
         if not os.path.exists(reference_audio_path):
             logging.error(f"Reference audio not found: {reference_audio_path}")

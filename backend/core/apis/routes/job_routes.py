@@ -315,7 +315,7 @@ def resume_job(
 )
 def get_audio_output(
     job_id: str,
-    format: Optional[str] = Query("wav", description="Audio format ('wav', 'mp3', or 'mp3_small')"),
+    format: Optional[str] = Query("wav", description="Audio format ('wav' or 'mp3')"),
     db: Session = Depends(get_db),
 ) -> FileResponse:
     """
@@ -526,7 +526,7 @@ async def tts_preview_custom(
     file: UploadFile = File(..., description="Custom reference voice audio file"),
     language: str = Form("hi", description="Language code ('hi', 'en', 'mr')"),
     speed: float = Form(1.0, description="Speech playback rate multiplier"),
-    consent: bool = Form(True, description="Confirmation of voice ownership or authorization"),
+    consent: bool = Form(..., description="Confirmation of voice ownership or authorization"),
     db: Session = Depends(get_db),
 ) -> TTSPreviewResponse:
     """

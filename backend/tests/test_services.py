@@ -117,36 +117,96 @@ def test_export_mp3_and_ai_metadata(synthetic_tone_wav: Path, temp_audio_dir: Pa
 
 def test_encoder_formats_and_tags(synthetic_tone_wav: Path, temp_audio_dir: Path) -> None:
     """
-    Verify high-quality and small MP3 encoder durations match WAV within 50 ms and preserve tags.
+    Verify the single MP3 deliverable matches WAV duration, preserves AI tags, and
+    that no extra audio variants are produced (max two output files per job).
     """
     wav_meta = AudioService.probe_audio(synthetic_tone_wav)
     sizes = AudioService.export_all_formats(synthetic_tone_wav, temp_audio_dir)
 
     mp3_path = temp_audio_dir / "output.mp3"
-    mp3_small_path = temp_audio_dir / "output_small.mp3"
-
     assert mp3_path.exists()
-    assert mp3_small_path.exists()
-    assert sizes["wav_bytes"] > 0
+    assert not (temp_audio_dir / "output_small.mp3").exists()
+    assert set(sizes) == {"wav_bytes", "mp3_bytes"}
     assert sizes["mp3_bytes"] > 0
-    assert sizes["mp3_small_bytes"] > 0
-    assert sizes["mp3_small_bytes"] < sizes["mp3_bytes"]
 
     mp3_meta = AudioService.probe_audio(mp3_path)
-    mp3_small_meta = AudioService.probe_audio(mp3_small_path)
-    # MP3 frame size at 22050 Hz is 1152 samples (~52.2ms); encoder priming + padding can add up to ~80-100ms
     assert abs(mp3_meta.duration_seconds - wav_meta.duration_seconds) <= 0.120
-    assert abs(mp3_small_meta.duration_seconds - wav_meta.duration_seconds) <= 0.120
-    assert mp3_small_meta.channels == 1
+    assert mp3_meta.channels == 1
 
     mp3_tags = AudioService.read_audio_tags(mp3_path)
-    mp3_small_tags = AudioService.read_audio_tags(mp3_small_path)
-
     all_mp3_tag_text = " ".join(f"{k}:{v}" for k, v in mp3_tags.items()).lower()
-    all_small_tag_text = " ".join(f"{k}:{v}" for k, v in mp3_small_tags.items()).lower()
-
     assert "ai" in all_mp3_tag_text or "voice studio" in all_mp3_tag_text
-    assert "ai" in all_small_tag_text or "voice studio" in all_small_tag_text
+
+
+def test_polish_applies_speed(synthetic_tone_wav: Path, temp_audio_dir: Path) -> None:
+    """
+    Speed setting must actually change duration (it was silently ignored before).
+    """
+    src = AudioService.probe_audio(synthetic_tone_wav)
+    out = temp_audio_dir / "fast.wav"
+    AudioService.polish(synthetic_tone_wav, out, speed=1.25, sample_rate=24000)
+    meta = AudioService.probe_audio(out)
+    assert meta.sample_rate == 24000
+    assert meta.channels == 1
+    assert abs(meta.duration_seconds - src.duration_seconds / 1.25) < 0.1
+
+
+def test_keep_only_final_outputs(tmp_path: Path) -> None:
+    """
+    A finished job directory keeps exactly output.wav + output.mp3.
+    """
+    from core.services.jobs.cleanup_service import CleanupService
+
+    job_dir = tmp_path / "job"
+    (job_dir / "chunks").mkdir(parents=True)
+    (job_dir / "chunks" / "chunk_0000.wav").write_bytes(b"x")
+    for name in ("output.wav", "output.mp3", "reference.wav", "output_small.mp3", "_concat_list.txt"):
+        (job_dir / name).write_bytes(b"x")
+    CleanupService.keep_only_final_outputs(job_dir)
+    assert sorted(p.name for p in job_dir.iterdir()) == ["output.mp3", "output.wav"]
+
+
+def test_janitor_removes_orphans_and_trims_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """
+    Orphan folders (no DB row) are purged and the conditionals cache is capped.
+    """
+    import os
+    import time
+    from core.services.jobs import cleanup_service as cs
+    from core.database.database import SessionLocal
+
+    monkeypatch.setattr(cs.settings, "TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(cs.settings, "CONDS_CACHE_MAX_FILES", 2)
+    old = time.time() - 3600
+
+    orphan = tmp_path / ("o" * 22)
+    orphan.mkdir()
+    (orphan / "output.wav").write_bytes(b"x")
+    stray = tmp_path / "self_check_tone.wav"
+    stray.write_bytes(b"x")
+    fresh = tmp_path / ("f" * 22)
+    fresh.mkdir()
+    for path in (orphan, stray):
+        os.utime(path, (old, old))
+
+    cache = tmp_path / "cache" / "conditionals"
+    cache.mkdir(parents=True)
+    for i in range(5):
+        f = cache / f"c{i}.pt"
+        f.write_bytes(b"x")
+        os.utime(f, (old + i, old + i))
+
+    db = SessionLocal()
+    try:
+        cs.CleanupService.clean_orphan_dirs(db)
+        cs.CleanupService.trim_conditionals_cache()
+    finally:
+        db.close()
+
+    assert not orphan.exists()
+    assert not stray.exists()
+    assert fresh.exists(), "folders younger than the grace period must survive (upload in progress)"
+    assert sorted(p.name for p in cache.iterdir()) == ["c3.pt", "c4.pt"]
 
 
 def test_probe_corrupt_file_raises_custom_error(temp_audio_dir: Path) -> None:

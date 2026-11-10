@@ -1,3 +1,4 @@
+import io
 """
 API and integration test suite for AI Voice Studio core endpoints.
 """
@@ -1051,3 +1052,87 @@ def test_custom_tts_unsupported_language_returns_400(tmp_path: Path) -> None:
 
 
 
+
+
+
+# ---------------------------------------------------------------------------
+# Security regression tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/audio/preview/..%5C..%5C..%5Cvoice_studio",
+        "/v1/audio/preview/..",
+        "/v1/jobs/..%5Cvoices",
+        "/v1/audio/..%5C..%5Cvoices/output",
+    ],
+)
+def test_malformed_job_ids_rejected(path: str) -> None:
+    """
+    Backslash / dot-dot IDs (path traversal on Windows) never reach the filesystem.
+    """
+    response = client.get(path)
+    assert response.status_code == 404
+
+
+def test_spoofed_forwarded_for_does_not_change_client_key() -> None:
+    """
+    X-Forwarded-For is ignored unless TRUST_PROXY_HEADERS is enabled.
+    """
+    from starlette.requests import Request
+    from core.apis.middleware import get_hashed_client_key
+
+    def make(headers):
+        scope = {
+            "type": "http",
+            "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+            "client": ("10.0.0.5", 1234),
+        }
+        return Request(scope)
+
+    assert get_hashed_client_key(make({})) == get_hashed_client_key(make({"X-Forwarded-For": "1.2.3.4"}))
+
+
+@pytest.mark.rate_limit
+def test_preview_endpoints_are_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    GPU-heavy preview endpoints are covered by the rate limiter.
+    """
+    from core.apis import middleware
+
+    monkeypatch.setattr(middleware.settings, "RATE_LIMIT_PER_MINUTE", 2)
+    local = TestClient(app, client=("203.0.113.77", 5000))
+    codes = [
+        local.post("/v1/tts/preview", json={"text": "hi", "voice_id": "does_not_exist"}).status_code
+        for _ in range(3)
+    ]
+    assert codes[-1] == 429
+
+
+def test_custom_preview_requires_explicit_consent() -> None:
+    """
+    Omitting `consent` must fail validation instead of defaulting to True.
+    """
+    tone = io.BytesIO(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    response = client.post(
+        "/v1/tts/preview/custom",
+        data={"text": "hello", "language": "en"},
+        files={"file": ("ref.wav", tone, "audio/wav")},
+    )
+    assert response.status_code == 422
+
+
+def test_non_audio_upload_rejected_without_leaking_paths() -> None:
+    """
+    A playlist disguised as .wav is rejected by content sniffing before ffmpeg sees it.
+    """
+    playlist = io.BytesIO(b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\nfile:///etc/passwd\n")
+    response = client.post(
+        "/v1/tts/custom",
+        data={"text": "hello world", "language": "en", "consent": "true"},
+        files={"file": ("ref.wav", playlist, "audio/wav")},
+    )
+    assert response.status_code == 400
+    body = response.text
+    assert "storage" not in body and ":\\" not in body

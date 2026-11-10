@@ -6,7 +6,10 @@ Provides standardized logging formatters and console/file handlers.
 
 import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+_LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 
 
 def logger(name: str = __name__) -> logging.Logger:
@@ -43,10 +46,14 @@ def logger(name: str = __name__) -> logging.Logger:
 
         # File handler (if logs directory exists or can be created)
         try:
-            log_dir = Path("logs")
-            log_dir.mkdir(parents=True, exist_ok=True)
-            file_handler = logging.FileHandler(
-                log_dir / "app.log", encoding="utf-8"
+            # Anchored to backend/logs and size-capped so logs never pile up
+            _LOG_DIR.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                _LOG_DIR / "app.log",
+                maxBytes=int(os.environ.get("LOG_MAX_BYTES", 1_000_000)),
+                backupCount=int(os.environ.get("LOG_BACKUP_COUNT", 1)),
+                encoding="utf-8",
+                delay=True,
             )
             file_handler.setFormatter(formatter)
             file_handler.setLevel(logging.INFO)

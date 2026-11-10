@@ -1487,7 +1487,7 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                       <div>
                         <span style={{ fontSize: 'var(--font-sm)', fontWeight: 600 }}>MP3 high-fidelity</span>
                         <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-muted)' }}>
-                          192 kbps stereo for clean sharing
+                          192 kbps, ready for X / Instagram / YouTube
                         </p>
                       </div>
                       <a
@@ -1504,27 +1504,6 @@ export const TTSWizard: React.FC<TTSWizardProps> = ({
                       </a>
                     </div>
 
-                    {/* Small MP3 WhatsApp */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--color-border)', paddingTop: 'var(--space-1)' }}>
-                      <div>
-                        <span style={{ fontSize: 'var(--font-sm)', fontWeight: 600 }}>Small MP3 (WhatsApp)</span>
-                        <p style={{ fontSize: 'var(--font-sm)', color: 'var(--color-text-muted)' }}>
-                          Lightweight 64 kbps mono (Send as Document in WhatsApp)
-                        </p>
-                      </div>
-                      <a
-                        href={activeJob.output_files?.mp3_small?.url || `/v1/audio/${activeJob.job_id}/output?format=mp3_small`}
-                        download="audio_compact.mp3"
-                        style={{
-                          fontSize: 'var(--font-sm)',
-                          fontWeight: 600,
-                          color: 'var(--color-accent)',
-                          textDecoration: 'none',
-                        }}
-                      >
-                        Download
-                      </a>
-                    </div>
                   </div>
                 </div>
               ) : activeJob?.status === 'failed' ? (

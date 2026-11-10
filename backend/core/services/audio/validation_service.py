@@ -25,6 +25,24 @@ settings = get_settings()
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".ogg", ".webm", ".flac"}
 
 
+def _looks_like_audio(head: bytes) -> bool:
+    """
+    Check file magic bytes so a renamed playlist/script (e.g. an HLS .m3u8 saved as
+    .wav, which ffmpeg would follow to read local files or fetch URLs) is rejected.
+    """
+    if len(head) < 12:
+        return False
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return True
+    if head[:3] == b"ID3" or (head[0] == 0xFF and (head[1] & 0xE0) == 0xE0):
+        return True  # MP3 (ID3 tag or MPEG frame sync)
+    if head[4:8] == b"ftyp":
+        return True  # MP4/M4A
+    if head[:4] in (b"OggS", b"fLaC", b"\x1aE\xdf\xa3"):
+        return True  # Ogg, FLAC, WebM/Matroska
+    return False
+
+
 class AudioValidationError(Exception):
     """Base exception for audio file and stream validation failures."""
     pass
@@ -150,6 +168,10 @@ class ValidationService:
                         logging.warning(f"Upload exceeded size limit: {total_bytes} > {cutoff} bytes")
                         raise AudioFileSizeExceededError(
                             f"File size exceeds maximum allowed limit of {settings.MAX_UPLOAD_MB} MB."
+                        )
+                    if total_bytes == len(chunk) and not _looks_like_audio(chunk[:16]):
+                        raise InvalidAudioExtensionError(
+                            "File content is not a recognised audio format."
                         )
                     buffer.write(chunk)
         except Exception:

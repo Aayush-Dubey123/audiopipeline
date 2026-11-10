@@ -108,6 +108,7 @@ class AudioService:
         cmd = [
             "ffprobe",
             "-v", "error",
+            "-protocol_whitelist", "file",
             "-show_entries", "format=duration,format_name:stream=duration,sample_rate,channels",
             "-of", "json",
             str(file_path),
@@ -217,6 +218,7 @@ class AudioService:
         cmd = [
             "ffmpeg",
             "-y",
+            "-protocol_whitelist", "file",
             "-i", str(input_path),
             "-vn",
             "-c:a", "pcm_s16le",
@@ -226,6 +228,9 @@ class AudioService:
         try:
             subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
             return output_path
+        except subprocess.TimeoutExpired:
+            output_path.unlink(missing_ok=True)
+            raise AudioCorruptError("Transcoding to WAV timed out.")
         except subprocess.CalledProcessError as error:
             logging.error(f"Error in AudioService.to_wav: {error.stderr}")
             raise AudioCorruptError(f"Transcoding to WAV failed: {error.stderr}")
@@ -261,6 +266,7 @@ class AudioService:
         cmd = [
             "ffmpeg",
             "-y",
+            "-protocol_whitelist", "file",
             "-i", str(input_path),
             "-ar", str(target_sample_rate),
             "-ac", "1",
@@ -272,11 +278,11 @@ class AudioService:
             if in_place:
                 shutil.move(str(target_file), str(output_path))
             return output_path
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             if in_place and target_file.exists():
                 target_file.unlink()
-            logging.error(f"Error in AudioService.resample: {error.stderr}")
-            raise AudioProcessingError(f"Resampling failed: {error.stderr}")
+            logging.error(f"Error in AudioService.resample: {getattr(error, 'stderr', error)}")
+            raise AudioProcessingError("Resampling failed.")
 
     @classmethod
     def normalize_loudness(cls, input_path: Path, output_path: Path) -> Path:
@@ -314,15 +320,15 @@ class AudioService:
         ]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=120)
             if in_place:
                 shutil.move(str(target_file), str(output_path))
             return output_path
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             if in_place and target_file.exists():
                 target_file.unlink()
-            logging.error(f"Error in AudioService.normalize_loudness: {error.stderr}")
-            raise AudioProcessingError(f"Loudness normalization failed: {error.stderr}")
+            logging.error(f"Error in AudioService.normalize_loudness: {getattr(error, 'stderr', error)}")
+            raise AudioProcessingError("Loudness normalization failed.")
 
     @classmethod
     def export_mp3(
@@ -377,16 +383,17 @@ class AudioService:
         ])
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=60)
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
             return output_path
-        except subprocess.CalledProcessError as error:
-            logging.error(f"Error in AudioService.export_mp3: {error.stderr}")
-            raise AudioProcessingError(f"MP3 export failed: {error.stderr}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            output_path.unlink(missing_ok=True)
+            logging.error(f"Error in AudioService.export_mp3: {getattr(error, 'stderr', error)}")
+            raise AudioProcessingError("MP3 export failed.")
 
     @classmethod
     def export_all_formats(cls, wav_path: Path, job_dir: Path) -> dict:
         """
-        Encode high-quality MP3 and lightweight WhatsApp-friendly mono MP3 from master WAV.
+        Encode the single 192 kbps MP3 deliverable from the master WAV.
 
         Encodes directly from the master WAV without re-synthesis, preserving AI attribution tags.
 
@@ -395,17 +402,62 @@ class AudioService:
             job_dir (Path): Job root directory where output files reside.
 
         Returns:
-            dict: Mapping of format keys ('wav', 'mp3', 'mp3_small') to byte sizes on disk.
+            dict: Mapping of format keys ('wav', 'mp3') to byte sizes on disk.
         """
         mp3_high = job_dir / "output.mp3"
-        mp3_small = job_dir / "output_small.mp3"
-        cls.export_mp3(wav_path, mp3_high, bitrate="192k", mono=False)
-        cls.export_mp3(wav_path, mp3_small, bitrate="64k", mono=True)
+        # Speech is mono; a mono 192k MP3 is transparent for voice and half the size of stereo.
+        cls.export_mp3(wav_path, mp3_high, bitrate="192k", mono=True)
         return {
             "wav_bytes": wav_path.stat().st_size if wav_path.is_file() else 0,
             "mp3_bytes": mp3_high.stat().st_size if mp3_high.is_file() else 0,
-            "mp3_small_bytes": mp3_small.stat().st_size if mp3_small.is_file() else 0,
         }
+
+    @classmethod
+    def polish(cls, input_path: Path, output_path: Path, speed: float = 1.0, sample_rate: int = 24000) -> Path:
+        """
+        Single ffmpeg pass: optional tempo change (pitch preserved) + loudness normalisation.
+
+        Doing both in one pass avoids an extra full re-encode and temp file.
+
+        Args:
+            input_path (Path): Source WAV.
+            output_path (Path): Destination WAV (may equal input_path).
+            speed (float): Tempo multiplier, 0.5-2.0. 1.0 = unchanged.
+            sample_rate (int): Output sample rate.
+
+        Returns:
+            Path: Polished WAV path.
+        """
+        cls._check_ffmpeg_tool("ffmpeg")
+        speed = max(0.5, min(2.0, float(speed or 1.0)))
+        filters = []
+        if abs(speed - 1.0) > 0.01:
+            filters.append(f"atempo={speed:.3f}")
+        filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
+
+        in_place = input_path.resolve() == output_path.resolve()
+        target_file = (
+            output_path.parent / f"_tmp_{uuid.uuid4().hex[:8]}_{output_path.name}" if in_place else output_path
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_path),
+            "-af", ",".join(filters),
+            "-ar", str(sample_rate),
+            "-ac", "1",
+            "-c:a", "pcm_s16le",
+            str(target_file),
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
+            if in_place:
+                shutil.move(str(target_file), str(output_path))
+            return output_path
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            if in_place and target_file.exists():
+                target_file.unlink()
+            logging.error(f"Error in AudioService.polish: {getattr(error, 'stderr', error)}")
+            raise AudioProcessingError("Audio polishing failed.")
 
     @classmethod
     def add_ai_label_metadata(
@@ -446,11 +498,11 @@ class AudioService:
             # Replace original with tagged version
             shutil.move(str(temp_output), str(audio_path))
             return audio_path
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
             if temp_output.exists():
                 temp_output.unlink()
-            logging.error(f"Error in AudioService.add_ai_label_metadata: {error.stderr}")
-            raise AudioProcessingError(f"Metadata tagging failed: {error.stderr}")
+            logging.error(f"Error in AudioService.add_ai_label_metadata: {getattr(error, 'stderr', error)}")
+            raise AudioProcessingError("Metadata tagging failed.")
 
     @classmethod
     def join_chunks_ffmpeg(

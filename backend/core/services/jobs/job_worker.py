@@ -147,6 +147,9 @@ class JobWorker:
         self._running: bool = False
         self._lock: threading.Lock = threading.Lock()
         self._default_pipeline: Optional[Callable] = None
+        self._last_janitor: float = 0.0
+        self._last_job_finished: float = time.monotonic()
+        self._model_warm: bool = False
 
     def set_default_pipeline(self, pipeline_fn: Callable) -> None:
         """
@@ -174,6 +177,7 @@ class JobWorker:
                 JobCRUD.recover_stale_jobs(db)
             finally:
                 db.close()
+            self._run_janitor()
 
             if self._default_pipeline is None:
                 self._default_pipeline = production_inference_pipeline
@@ -222,6 +226,7 @@ class JobWorker:
             try:
                 item = self.queue.get(timeout=1.0)
             except queue.Empty:
+                self._idle_housekeeping()
                 continue
 
             job_id, pipeline_fn = item
@@ -230,13 +235,42 @@ class JobWorker:
                 break
 
             try:
+                self._model_warm = True
                 self._execute_job(job_id, pipeline_fn)
             except Exception as loop_error:
                 logging.error(f"Unexpected error in JobWorker execution loop for job '{job_id}': {loop_error}")
             finally:
+                self._last_job_finished = time.monotonic()
                 self.queue.task_done()
 
         logging.info("JobWorker background loop terminated")
+
+    def _run_janitor(self) -> None:
+        """Purge expired/failed/orphaned job files and trim caches."""
+        self._last_janitor = time.monotonic()
+        db = SessionLocal()
+        try:
+            CleanupService.run_janitor(db)
+        except Exception as err:
+            logging.warning(f"Janitor pass failed: {err}")
+        finally:
+            db.close()
+
+    def _idle_housekeeping(self) -> None:
+        """Runs only while the queue is empty, so it never competes with a job."""
+        now = time.monotonic()
+        if now - self._last_janitor >= max(settings.CLEANUP_INTERVAL_SECONDS, 60):
+            self._run_janitor()
+        idle_limit = settings.MODEL_IDLE_UNLOAD_SECONDS
+        if self._model_warm and idle_limit > 0 and now - self._last_job_finished >= idle_limit:
+            self._model_warm = False
+            try:
+                from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
+                if ChatterboxService._resident_model is not None:
+                    logging.info(f"Model idle for {idle_limit}s, releasing GPU/CPU memory")
+                    ChatterboxService.unload_all()
+            except Exception as err:
+                logging.warning(f"Idle model unload failed: {err}")
 
     def _execute_job(self, job_id: str, pipeline_fn: Optional[Callable]) -> None:
         """
@@ -420,7 +454,8 @@ def _run_long_form_tts(
         service = ChatterboxService()
     chunk_paths = []
     job_start_time = time.perf_counter()
-    sample_rate = 44100 if "chatterbox" in type(service).__name__.lower() else 22050
+    # Model-native 24 kHz: no pointless upsampling, ~45% smaller files than 44.1 kHz.
+    sample_rate = settings.OUTPUT_SAMPLE_RATE
 
     try:
         for idx, chunk_text in enumerate(chunks):
@@ -453,13 +488,12 @@ def _run_long_form_tts(
                 "output_path": str(chunk_part),
                 "language": chunk_lang,
             }
-            if hasattr(service, "generate"):
-                import inspect
-                try:
-                    if "speed" in inspect.signature(service.generate).parameters:
-                        gen_kwargs["speed"] = speed
-                except Exception:
-                    pass
+            import inspect
+            try:
+                if "target_sample_rate" in inspect.signature(service.generate).parameters:
+                    gen_kwargs["target_sample_rate"] = sample_rate
+            except (TypeError, ValueError):
+                pass
             res = service.generate(**gen_kwargs)
 
             # Atomically rename .part to final chunk .wav
@@ -525,20 +559,20 @@ def _run_long_form_tts(
                 sample_rate=sample_rate,
             )
 
-        # Single post-join loudness normalization
+        # Single post-join pass: speed (pitch-preserving) + loudness normalization
         try:
-            AudioService.normalize_loudness(out_wav, out_wav)
+            AudioService.polish(out_wav, out_wav, speed=speed, sample_rate=sample_rate)
         except Exception as norm_err:
-            logging.warning(f"Loudness normalization skipped or failed: {norm_err}")
+            logging.warning(f"Audio polish skipped or failed: {norm_err}")
 
         # 5. Add synthetic AI attribution metadata
         AudioService.add_ai_label_metadata(out_wav)
 
-        # 6. Pre-encode MP3 formats (192k high quality + 64k mono WhatsApp-friendly) from master WAV
+        # 6. Encode the single MP3 deliverable from the master WAV
         format_sizes = AudioService.export_all_formats(out_wav, job_dir)
 
-        # 7. Purge intermediate chunks ONLY after successful join
-        shutil.rmtree(chunks_dir, ignore_errors=True)
+        # 7. Success: keep exactly output.wav + output.mp3 (drops chunks, reference, temp files)
+        CleanupService.keep_only_final_outputs(job_dir)
 
         final_meta = AudioService.probe_audio(out_wav)
         return {
@@ -662,6 +696,7 @@ def production_inference_pipeline(
 
         from core.services.llm.llm_service import LLMService
         text = LLMService.rule_based_cleanup(raw_text, language=language)
+        ref_path = None
         # 1. Custom reference audio uploaded for this specific preview job takes precedence
         job_ref = job_dir / "reference.wav"
         if job_ref.exists() and job_ref.stat().st_size > 44:
@@ -711,12 +746,13 @@ def production_inference_pipeline(
         from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
         pipeline_service = ChatterboxService()
 
+        preview_wav = job_dir / "preview.wav"
         pipeline_service.generate(
             text=text,
             reference_audio_path=str(ref_path),
-            output_path=str(out_wav),
-            speed=speed,
+            output_path=str(preview_wav),
             language=language,
+            target_sample_rate=settings.OUTPUT_SAMPLE_RATE,
         )
 
         db = SessionLocal()
@@ -733,13 +769,10 @@ def production_inference_pipeline(
         finally:
             db.close()
 
-        AudioService.normalize_loudness(out_wav, out_wav)
-        AudioService.add_ai_label_metadata(out_wav)
-        meta = AudioService.probe_audio(out_wav)
-
-        preview_wav = job_dir / "preview.wav"
-        if not preview_wav.exists() and out_wav.exists():
-            shutil.copyfile(str(out_wav), str(preview_wav))
+        AudioService.polish(preview_wav, preview_wav, speed=speed, sample_rate=settings.OUTPUT_SAMPLE_RATE)
+        AudioService.add_ai_label_metadata(preview_wav)
+        meta = AudioService.probe_audio(preview_wav)
+        CleanupService.keep_only_final_outputs(job_dir, keep={"preview.wav"})
 
         return {
             "format": "wav",

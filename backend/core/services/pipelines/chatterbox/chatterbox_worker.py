@@ -22,7 +22,9 @@ def synthesize(
     temperature: float = 0.6,
     cfg_weight: float = 0.7,
     exaggeration: float = 0.3,
-    target_sample_rate: int = 44100,
+    target_sample_rate: int = 24000,
+    device: str = "auto",
+    cache_dir: str = "",
 ) -> dict:
     """
     Run Chatterbox Multilingual synthesis on GPU and export high-fidelity audio.
@@ -45,7 +47,10 @@ def synthesize(
     """
     from chatterbox import ChatterboxMultilingualTTS
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device not in ("cuda", "cpu"):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda" and not torch.cuda.is_available():
+        device = "cpu"
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
@@ -59,9 +64,9 @@ def synthesize(
 
     ref_bytes = Path(ref_path).read_bytes()
     ref_hash = hashlib.sha256(ref_bytes).hexdigest()[:16]
-    cache_dir = Path("storage/tmp/cache/conditionals")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_dir / f"{ref_hash}_{int(exaggeration * 100)}.pt"
+    cache_root = Path(cache_dir) if cache_dir else Path(__file__).resolve().parents[4] / "storage" / "tmp" / "cache" / "conditionals"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_root / f"{ref_hash}_{int(exaggeration * 100)}.pt"
 
     if cache_file.exists():
         model.conds = Conditionals.load(cache_file, map_location=device)
@@ -154,7 +159,9 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
     parser.add_argument("--cfg", type=float, default=0.7, help="CFG weight")
     parser.add_argument("--exaggeration", type=float, default=0.3, help="Exaggeration strength")
-    parser.add_argument("--sample-rate", type=int, default=44100, help="Target sample rate (Hz)")
+    parser.add_argument("--sample-rate", type=int, default=24000, help="Target sample rate (Hz)")
+    parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="Inference device")
+    parser.add_argument("--cache-dir", default="", help="Speaker conditioning cache directory")
 
     args = parser.parse_args()
 
@@ -168,6 +175,8 @@ def main() -> None:
             cfg_weight=args.cfg,
             exaggeration=args.exaggeration,
             target_sample_rate=args.sample_rate,
+            device=args.device,
+            cache_dir=args.cache_dir,
         )
         print(json.dumps(res))
         sys.exit(0)

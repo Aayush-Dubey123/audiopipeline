@@ -1,19 +1,22 @@
-# Web Framework & ASGI Server
-fastapi==0.115.8
-uvicorn[standard]==0.34.0
+# Web Framework & ASGI Server (pinned to patched, tested versions)
+fastapi==0.143.3
+starlette==0.52.1
+uvicorn[standard]==0.54.0
+h11==0.16.0
 
 # Data Validation & Settings
-pydantic==2.10.6
-pydantic-settings==2.7.1
-python-multipart==0.0.20
+pydantic==2.14.1
+pydantic-settings==2.15.0
+python-multipart==0.0.32
+python-dotenv==1.2.4
 
 # Database (SQLAlchemy SQLite)
-sqlalchemy==2.0.38
+sqlalchemy==2.0.48
 
 # Audio Processing Utilities (Probe, Resample, Convert)
-soundfile==0.13.1
-librosa==0.10.2.post1
+soundfile==0.14.0
+librosa==0.11.0
 
 # Testing & HTTP Client
-pytest==8.3.4
+pytest==9.1.1
 httpx==0.28.1

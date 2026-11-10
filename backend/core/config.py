@@ -24,7 +24,14 @@ class Settings(BaseSettings):
     )
 
     ENV: str = Field(default="development", description="Runtime environment: development or production")
-    DEBUG: bool = Field(default=True, description="Debug mode toggle")
+    DEBUG: bool = Field(default=False, description="Debug mode toggle")
+
+    HOST: str = Field(default="127.0.0.1", description="Bind address. Keep 127.0.0.1 unless you need LAN/container access")
+    PORT: int = Field(default=8000, description="Bind port")
+    TRUST_PROXY_HEADERS: bool = Field(
+        default=False,
+        description="Trust X-Forwarded-For for client identity. Enable ONLY behind a trusted reverse proxy",
+    )
 
     ALLOWED_ORIGINS: str = Field(
         default="http://localhost:3000,http://localhost:5173",
@@ -51,8 +58,16 @@ class Settings(BaseSettings):
         Raises:
             None
         """
+        backend_dir = Path(__file__).resolve().parent.parent
+        default_sqlite = f"sqlite:///{(backend_dir / 'voice_studio.db').as_posix()}"
         if not v or "USER:PASSWORD" in v or "DBNAME" in v:
-            return "sqlite:///./voice_studio.db"
+            return default_sqlite
+        # Anchor relative SQLite paths to backend/ so launching from another folder
+        # never creates a stray second database.
+        if v.startswith("sqlite:///./") or (v.startswith("sqlite:///") and not v.startswith("sqlite:////")
+                                             and not Path(v[len("sqlite:///"):]).is_absolute()):
+            rel = v[len("sqlite:///"):]
+            return f"sqlite:///{(backend_dir / rel).resolve().as_posix()}"
         return v
 
     TMP_DIR: str = Field(default="storage/tmp", description="Temporary files storage directory")
@@ -69,10 +84,22 @@ class Settings(BaseSettings):
     CHUNK_TIMEOUT_SECONDS: int = Field(default=180, description="Timeout per individual synthesis chunk in seconds")
     JOB_MAX_SECONDS: int = Field(default=7200, description="Absolute wall-clock limit for a single job (2 hours)")
 
-    JOB_TTL_MINUTES: int = Field(default=240, description="Job artifact retention time in minutes, counted from job completion")
+    JOB_TTL_MINUTES: int = Field(default=120, description="Job artifact retention time in minutes, counted from job completion")
     QUEUE_MAX_SIZE: int = Field(default=10, description="Maximum queue capacity for inference jobs")
     JOB_TIMEOUT_SECONDS: int = Field(default=180, description="Legacy single-call timeout in seconds (kept for VC jobs)")
     RATE_LIMIT_PER_MINUTE: int = Field(default=10, description="Max requests permitted per minute per IP")
+
+    # Storage hygiene (prevents junk build-up)
+    CLEANUP_INTERVAL_SECONDS: int = Field(default=600, description="How often the janitor purges expired/orphaned files")
+    FAILED_JOB_TTL_MINUTES: int = Field(default=60, description="Keep failed-job chunks this long for resume, then purge")
+    CONDS_CACHE_MAX_FILES: int = Field(default=10, description="Max cached speaker-conditioning files kept on disk")
+    LOG_MAX_BYTES: int = Field(default=1_000_000, description="Rotate app.log at this size")
+    LOG_BACKUP_COUNT: int = Field(default=1, description="Rotated log files to keep")
+
+    # Inference resource policy
+    CHATTERBOX_DEVICE: str = Field(default="auto", description="auto | cuda | cpu")
+    OUTPUT_SAMPLE_RATE: int = Field(default=24000, description="Output WAV sample rate (model native 24 kHz = smallest, no quality loss)")
+    MODEL_IDLE_UNLOAD_SECONDS: int = Field(default=300, description="Free GPU memory after this many idle seconds (0 = never)")
 
     # Per-client generation cap
     CLIENT_DAILY_MINUTES: int = Field(default=120, description="Maximum generated audio minutes per client (hashed IP) per day")

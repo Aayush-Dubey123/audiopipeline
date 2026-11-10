@@ -55,6 +55,12 @@ from core.config import get_settings
 
 settings = get_settings()
 
+_RATE_LIMITED_PREFIXES = ("/v1/tts", "/v1/vc", "/v1/reference/", "/v1/text/", "/v1/jobs/")
+
+
+def _is_rate_limited_path(path: str) -> bool:
+    return path.startswith(_RATE_LIMITED_PREFIXES)
+
 
 def get_hashed_client_key(request: Request) -> str:
     """
@@ -68,9 +74,11 @@ def get_hashed_client_key(request: Request) -> str:
     Returns:
         str: 16-character hexadecimal client hash token.
     """
-    forwarded = request.headers.get("X-Forwarded-For")
+    # X-Forwarded-For is client-controlled; trusting it lets anyone bypass rate limits
+    # and quotas by sending a random header. Only honour it behind a trusted proxy.
+    forwarded = request.headers.get("X-Forwarded-For") if settings.TRUST_PROXY_HEADERS else None
     if forwarded:
-        raw_ip = forwarded.split(",")[0].strip()
+        raw_ip = forwarded.split(",")[-1].strip()
     elif request.client and request.client.host:
         raw_ip = request.client.host
     else:
@@ -110,8 +118,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             Response: Response or HTTP 429 JSON response.
         """
         path = request.url.path
-        RATE_LIMITED_PATHS = {"/v1/tts", "/v1/tts/custom", "/v1/vc"}
-        if path not in RATE_LIMITED_PATHS:
+        # Every endpoint that costs GPU, ffmpeg, or disk is rate limited.
+        if request.method != "POST" or not _is_rate_limited_path(path):
             return await call_next(request)
 
         client_key = get_hashed_client_key(request)
@@ -120,6 +128,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # Purge timestamps outside the 60-second sliding window
         self._history[client_key] = [t for t in self._history[client_key] if now - t < window]
+        # Drop idle clients so the history map cannot grow without bound
+        if len(self._history) > 1000:
+            for key in [k for k, v in self._history.items() if not v]:
+                del self._history[key]
 
         # Enforce rate limit
         limit = settings.RATE_LIMIT_PER_MINUTE if hasattr(settings, "RATE_LIMIT_PER_MINUTE") else self.rpm

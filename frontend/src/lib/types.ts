@@ -44,7 +44,6 @@ export interface AudioFileInfo {
 export interface OutputFilesMap {
   wav?: AudioFileInfo;
   mp3?: AudioFileInfo;
-  mp3_small?: AudioFileInfo;
 }
 
 export interface JobStatusResponse {

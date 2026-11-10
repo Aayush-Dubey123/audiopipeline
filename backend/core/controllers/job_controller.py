@@ -3,6 +3,7 @@ Controller managing inference job lifecycle, submissions, audio artifact streami
 """
 
 import os
+import re
 import secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -45,6 +46,22 @@ logging = logger(__name__)
 settings = get_settings()
 
 MAX_CONCURRENT_JOBS_PER_CLIENT = 3
+
+# Job IDs are secrets.token_urlsafe(16) or uuid4().hex. Anything else (dots, slashes,
+# backslashes) is rejected before it can touch the filesystem.
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+
+
+def validate_job_id(job_id: str) -> str:
+    """
+    Reject job/preview identifiers that are not in the server-issued token format.
+
+    Raises:
+        HTTPException 404: If the identifier is malformed (prevents path traversal).
+    """
+    if not isinstance(job_id, str) or not _JOB_ID_RE.fullmatch(job_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job_id
 
 
 class JobController:
@@ -284,7 +301,7 @@ class JobController:
         except Exception as exc:
             CleanupService.cleanup_job_directory(job_id)
             logging.error(f"Error processing custom reference upload: {exc}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to process reference audio: {exc}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to process reference audio. Upload a clear speech recording (wav/mp3/m4a/ogg/webm/flac).")
         finally:
             if temp_upload_path and temp_upload_path.exists() and temp_upload_path.name != "reference.wav":
                 try:
@@ -314,6 +331,7 @@ class JobController:
         try:
             job_worker.enqueue_job(job_id)
         except QueueFullError as q_err:
+            CleanupService.cleanup_job_directory(job_id)
             JobCRUD.update_job_status(db=db, job_id=job_id, status="failed", error_code="QUEUE_FULL", error_message=str(q_err))
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -419,7 +437,7 @@ class JobController:
         except Exception as exc:
             CleanupService.cleanup_job_directory(job_id)
             logging.error(f"Error processing VC audio upload: {exc}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to process audio: {exc}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to process audio.")
         finally:
             if temp_upload_path and temp_upload_path.exists() and temp_upload_path.name != "source.wav":
                 try:
@@ -495,6 +513,7 @@ class JobController:
         Raises:
             HTTPException 404: If job identifier is not registered.
         """
+        validate_job_id(job_id)
         logging.info(f"Executing JobController.get_job_status for job '{job_id}'")
         job = JobCRUD.get_job_by_id(db=db, job_id=job_id)
         if not job:
@@ -505,7 +524,9 @@ class JobController:
             )
 
         output_url = f"/v1/audio/{job_id}/output" if job.status == "completed" else None
-        source_url = f"/v1/audio/{job_id}/source" if job.kind in ("vc", "tts_custom") else None
+        src_dir = settings.tmp_path / job_id
+        has_source = (src_dir / "source.wav").is_file() or (src_dir / "reference.wav").is_file()
+        source_url = f"/v1/audio/{job_id}/source" if job.kind in ("vc", "tts_custom") and has_source else None
 
         output_files = None
         confidence_label = None
@@ -513,7 +534,6 @@ class JobController:
             job_dir = (settings.tmp_path / job_id).resolve()
             wav_file = job_dir / "output.wav"
             mp3_file = job_dir / "output.mp3"
-            mp3_small_file = job_dir / "output_small.mp3"
             output_files = {
                 "wav": {
                     "url": f"/v1/audio/{job_id}/output?format=wav",
@@ -523,12 +543,7 @@ class JobController:
                 "mp3": {
                     "url": f"/v1/audio/{job_id}/output?format=mp3",
                     "size_bytes": mp3_file.stat().st_size if mp3_file.is_file() else 0,
-                    "hint": "High-fidelity 192 kbps MP3 for quality sharing",
-                },
-                "mp3_small": {
-                    "url": f"/v1/audio/{job_id}/output?format=mp3_small",
-                    "size_bytes": mp3_small_file.stat().st_size if mp3_small_file.is_file() else 0,
-                    "hint": "Lightweight 64 kbps mono MP3 for quick WhatsApp review",
+                    "hint": "192 kbps MP3 ready for X / Instagram / YouTube uploads",
                 },
             }
             if job.output_metadata and isinstance(job.output_metadata, dict):
@@ -590,6 +605,7 @@ class JobController:
             HTTPException 400: If job is not in completed state or format is unsupported.
             HTTPException 404: If job or audio file is missing.
         """
+        validate_job_id(job_id)
         logging.info(f"Executing JobController.get_job_output_file for job '{job_id}' (format={audio_format})")
         fmt = audio_format.lower().strip()
         if fmt not in ("wav", "mp3", "mp3_small"):
@@ -647,18 +663,9 @@ class JobController:
                     )
             return mp3_path, "audio/mpeg", f"{job_id}_output.mp3"
 
-        # fmt == "mp3_small"
-        mp3_small_path = job_dir / "output_small.mp3"
-        if not mp3_small_path.is_file():
-            try:
-                AudioService.export_mp3(wav_path, mp3_small_path, bitrate="64k", mono=True)
-            except Exception as mp3_err:
-                logging.error(f"Failed to export small MP3 for job '{job_id}': {mp3_err}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Audio format conversion failed",
-                )
-        return mp3_small_path, "audio/mpeg", f"{job_id}_output_whatsapp_small.mp3"
+        # Legacy 'mp3_small' requests get the single MP3 so a job never holds
+        # more than two audio files (output.wav + output.mp3).
+        return JobController.get_job_output_file(db=db, job_id=job_id, audio_format="mp3")
 
     @staticmethod
     def get_job_source_file(db: Session, job_id: str) -> Tuple[Path, str, str]:
@@ -675,6 +682,7 @@ class JobController:
         Raises:
             HTTPException 404: If job or source audio file is missing.
         """
+        validate_job_id(job_id)
         logging.info(f"Executing JobController.get_job_source_file for job '{job_id}'")
         job = JobCRUD.get_job_by_id(db=db, job_id=job_id)
         if not job:
@@ -723,6 +731,7 @@ class JobController:
         Raises:
             HTTPException 404: If job record does not exist.
         """
+        validate_job_id(job_id)
         logging.info(f"Executing JobController.delete_job for job '{job_id}'")
         job = JobCRUD.get_job_by_id(db=db, job_id=job_id)
         if not job:
@@ -764,6 +773,7 @@ class JobController:
             HTTPException 404: If job does not exist.
             HTTPException 429: If queue is full or quotas are exceeded.
         """
+        validate_job_id(job_id)
         logging.info(f"Executing JobController.resume_job for job '{job_id}'")
         job = JobCRUD.get_job_by_id(db=db, job_id=job_id)
         if not job:
@@ -966,8 +976,13 @@ class JobController:
                 "updated_at": now,
                 "expires_at": expires_at,
             }
+            cls._check_client_active_job_quota(db=db, client_key=client_key)
             JobCRUD.create_job(db, job_data)
-            job_worker.enqueue_job(job_id)
+            try:
+                job_worker.enqueue_job(job_id)
+            except QueueFullError as q_err:
+                JobCRUD.update_job_status(db=db, job_id=job_id, status="failed", error_code="QUEUE_FULL", error_message=str(q_err))
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(q_err))
 
             return TTSPreviewResponse(
                 job_id=job_id,
@@ -982,6 +997,7 @@ class JobController:
         preview_dir.mkdir(parents=True, exist_ok=True)
         out_wav = preview_dir / "preview.wav"
 
+        cls._check_client_active_job_quota(db=db, client_key=client_key)
         from core.services.pipelines.chatterbox.chatterbox_service import ChatterboxService
         pipeline_service = ChatterboxService()
 
@@ -990,10 +1006,10 @@ class JobController:
                 text=preview_text,
                 reference_audio_path=str(ref_path),
                 output_path=str(out_wav),
-                speed=request.speed,
                 language=request.language or "hi",
+                target_sample_rate=settings.OUTPUT_SAMPLE_RATE,
             )
-            AudioService.normalize_loudness(out_wav, out_wav)
+            AudioService.polish(out_wav, out_wav, speed=request.speed, sample_rate=settings.OUTPUT_SAMPLE_RATE)
             AudioService.add_ai_label_metadata(out_wav)
             meta = AudioService.probe_audio(out_wav)
 
@@ -1029,9 +1045,10 @@ class JobController:
             JobCRUD.create_job(db, job_data)
         except Exception as err:
             logging.error(f"Preview generation failed: {err}")
+            CleanupService.cleanup_job_directory(job_id)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Preview synthesis failed: {err}",
+                detail="Preview synthesis failed.",
             )
 
         return TTSPreviewResponse(
@@ -1051,7 +1068,7 @@ class JobController:
         file: UploadFile,
         language: str = "hi",
         speed: float = 1.0,
-        consent: bool = True,
+        consent: bool = False,
     ) -> TTSPreviewResponse:
         """
         Generate rapid preview of up to 200 characters conditioned on custom reference audio.
@@ -1079,8 +1096,17 @@ class JobController:
                 detail="Explicit consent is required before generating speech conditioned on custom reference audio.",
             )
 
+        cls._check_client_active_job_quota(db=db, client_key=client_key)
+        cls._check_client_daily_quota(db=db, client_key=client_key)
+
+        language = (language or "hi").lower().strip()
+        if language not in ("en", "hi", "mr"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported language. Use 'en', 'hi' or 'mr'.")
+        if not (0.5 <= float(speed) <= 2.0):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="speed must be between 0.5 and 2.0.")
+
         from core.services.llm.llm_service import LLMService
-        clean_text = LLMService.rule_based_cleanup(text.strip()[:200], language=language or "hi")
+        clean_text = LLMService.rule_based_cleanup(text.strip()[:200], language=language)
         if not clean_text:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Text cannot be empty.")
 
@@ -1101,16 +1127,24 @@ class JobController:
                 upload_file=file,
                 destination_dir=job_dir,
             )
+            ValidationService.inspect_reference_audio_quality(
+                file_path=temp_upload_path,
+                min_duration=3.0,
+                max_duration=60.0,
+            )
             dest_wav = job_dir / "reference.wav"
             AudioService.to_wav(temp_upload_path, dest_wav)
             AudioService.resample(dest_wav, dest_wav, target_sample_rate=24000)
 
             ref_hash = hashlib.sha256(dest_wav.read_bytes()).hexdigest()[:16]
             logging.info(f"Custom preview reference saved: job_id='{job_id}', hash='{ref_hash}'")
+        except (AudioFileSizeExceededError, InvalidAudioExtensionError, AudioDurationExceededError, ReferenceQualityError) as val_err:
+            CleanupService.cleanup_job_directory(job_id)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(val_err))
         except Exception as exc:
             CleanupService.cleanup_job_directory(job_id)
             logging.error(f"Error processing custom preview reference: {exc}")
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to process reference audio: {exc}")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to process reference audio. Upload a clear speech recording (wav/mp3/m4a/ogg/webm/flac).")
         finally:
             if temp_upload_path and temp_upload_path.exists() and temp_upload_path.name != "reference.wav":
                 temp_upload_path.unlink(missing_ok=True)
@@ -1141,7 +1175,12 @@ class JobController:
             "expires_at": expires_at,
         }
         JobCRUD.create_job(db, job_data)
-        job_worker.enqueue_job(job_id)
+        try:
+            job_worker.enqueue_job(job_id)
+        except QueueFullError as q_err:
+            CleanupService.cleanup_job_directory(job_id)
+            JobCRUD.update_job_status(db=db, job_id=job_id, status="failed", error_code="QUEUE_FULL", error_message=str(q_err))
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(q_err))
 
         return TTSPreviewResponse(
             job_id=job_id,
@@ -1165,11 +1204,11 @@ class JobController:
         Raises:
             HTTPException 404: If preview file is not found.
         """
+        validate_job_id(preview_id)
         logging.info(f"Executing JobController.get_preview_file for preview '{preview_id}'")
         candidate_paths = [
             (settings.tmp_path / preview_id / "preview.wav"),
             (settings.tmp_path / preview_id / "output.wav"),
-            (settings.tmp_path / "previews" / preview_id / "preview.wav"),
         ]
         for p in candidate_paths:
             if p.is_file():
