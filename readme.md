@@ -291,7 +291,27 @@ pip install -r requirements.txt
 ### First-Run Model Download
 Chatterbox multilingual weights and tokenizer assets automatically download from Hugging Face Hub on the first inference execution into the local cache (`~/.cache/huggingface/hub`). Subsequent runs reuse cached weights with zero download latency.
 
-### Step 2: Start Backend Server
+### Quick Start: Run Everything in One Command
+
+**Option A: Local Development (Windows)**
+Run from the repository root in PowerShell:
+```powershell
+.\run.ps1
+```
+Or double-click / run:
+```cmd
+run.bat
+```
+*(Spawns both backend on `http://localhost:8000` and frontend on `http://localhost:3000` in dedicated windows).*
+
+**Option B: Docker Full Stack**
+```bash
+docker compose up --build
+```
+
+---
+
+### Step 2: Start Backend Server (Manual)
 ```bash
 # In backend directory or repository root using .venv:
 .venv\Scripts\python.exe -m uvicorn core.apis.api:app --app-dir backend --host 127.0.0.1 --port 8000
