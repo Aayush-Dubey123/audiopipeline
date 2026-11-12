@@ -40,6 +40,33 @@ def _is_abbreviation(word: str) -> bool:
     return word.lower().rstrip(".") in _ABBREVIATIONS
 
 
+_CHUNK_END_PUNCT = tuple(".!?।॥,;:\"')")
+
+
+def mark_mid_sentence_cuts(chunks: List[str], paragraph_starts: Set[int]) -> List[str]:
+    """
+    Give chunks that were cut mid-sentence a trailing comma.
+
+    Chatterbox appends '.' to any text without ending punctuation, which makes the voice
+    drop into sentence-final intonation in the middle of a sentence. A comma keeps it
+    continuing. Paragraph-final chunks are left alone.
+
+    Args:
+        chunks (List[str]): Chunk texts from split_text_with_boundaries.
+        paragraph_starts (Set[int]): Chunk indices that start a new paragraph.
+
+    Returns:
+        List[str]: Chunk texts ready for synthesis (same length and order).
+    """
+    marked = []
+    for idx, chunk in enumerate(chunks):
+        paragraph_end = idx == len(chunks) - 1 or (idx + 1) in paragraph_starts
+        if not paragraph_end and not chunk.rstrip().endswith(_CHUNK_END_PUNCT):
+            chunk = chunk.rstrip() + ","
+        marked.append(chunk)
+    return marked
+
+
 def split_text_with_boundaries(text: str, max_chars: int = 1000) -> Tuple[List[str], Set[int]]:
     if not text or not text.strip():
         return [], set()
@@ -392,7 +419,6 @@ def _run_long_form_tts(
     """
     from core.services.audio.audio_service import AudioService
     from core.database.database import SessionLocal
-    import shutil
 
     # 1. Enforce disk space safety before creating chunks
     AudioService.check_free_disk_gb(settings.tmp_path, required_gb=1.0)
@@ -415,6 +441,7 @@ def _run_long_form_tts(
     chunks, para_boundaries = split_text_with_boundaries(clean_text, max_chars=settings.CHUNK_MAX_CHARS)
     if not chunks:
         raise RuntimeError("No valid text provided for synthesis.")
+    chunks = mark_mid_sentence_cuts(chunks, para_boundaries)
 
     chunk_total = len(chunks)
     chunks_dir = job_dir / "chunks"
@@ -456,6 +483,11 @@ def _run_long_form_tts(
     job_start_time = time.perf_counter()
     # Model-native 24 kHz: no pointless upsampling, ~45% smaller files than 44.1 kHz.
     sample_rate = settings.OUTPUT_SAMPLE_RATE
+    import inspect
+    try:
+        accepts_sample_rate = "target_sample_rate" in inspect.signature(service.generate).parameters
+    except (TypeError, ValueError):
+        accepts_sample_rate = False
 
     try:
         for idx, chunk_text in enumerate(chunks):
@@ -488,12 +520,8 @@ def _run_long_form_tts(
                 "output_path": str(chunk_part),
                 "language": chunk_lang,
             }
-            import inspect
-            try:
-                if "target_sample_rate" in inspect.signature(service.generate).parameters:
-                    gen_kwargs["target_sample_rate"] = sample_rate
-            except (TypeError, ValueError):
-                pass
+            if accepts_sample_rate:
+                gen_kwargs["target_sample_rate"] = sample_rate
             res = service.generate(**gen_kwargs)
 
             # Atomically rename .part to final chunk .wav
@@ -547,26 +575,24 @@ def _run_long_form_tts(
         finally:
             db.close()
 
-        if chunk_total == 1:
-            shutil.copyfile(str(chunk_paths[0]), str(out_wav))
-        else:
-            AudioService.join_chunks_ffmpeg(
-                chunk_paths=chunk_paths,
-                output_path=out_wav,
-                pause_sentence_ms=settings.CHUNK_PAUSE_SENTENCE_MS,
-                pause_paragraph_ms=settings.CHUNK_PAUSE_PARAGRAPH_MS,
-                paragraph_boundary_indices=para_boundaries,
-                sample_rate=sample_rate,
-            )
+        # Trim, level-match and join over room tone (also cleans the edges of a single chunk)
+        AudioService.join_chunks_natural(
+            chunk_paths=chunk_paths,
+            output_path=out_wav,
+            chunk_texts=chunks,
+            pause_sentence_ms=settings.CHUNK_PAUSE_SENTENCE_MS,
+            pause_paragraph_ms=settings.CHUNK_PAUSE_PARAGRAPH_MS,
+            paragraph_boundary_indices=para_boundaries,
+            sample_rate=sample_rate,
+            seed=int(hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:8], 16),
+        )
 
-        # Single post-join pass: speed (pitch-preserving) + loudness normalization
+        # 5. One encode: speed (pitch-preserving) + linear loudness + AI attribution tags
         try:
-            AudioService.polish(out_wav, out_wav, speed=speed, sample_rate=sample_rate)
+            AudioService.polish(out_wav, out_wav, speed=speed, sample_rate=sample_rate, ai_label=AudioService.AI_LABEL)
         except Exception as norm_err:
             logging.warning(f"Audio polish skipped or failed: {norm_err}")
-
-        # 5. Add synthetic AI attribution metadata
-        AudioService.add_ai_label_metadata(out_wav)
+            AudioService.add_ai_label_metadata(out_wav)  # the AI label is never skipped
 
         # 6. Encode the single MP3 deliverable from the master WAV
         format_sizes = AudioService.export_all_formats(out_wav, job_dir)
@@ -594,6 +620,11 @@ def _run_long_form_tts(
             for p in chunks_dir.glob("*.part*"):
                 p.unlink(missing_ok=True)
         raise exc
+    finally:
+        # Free cached activation memory once per job (not per chunk); the model stays resident
+        release = getattr(service, "release_gpu_cache", None)
+        if callable(release):
+            release()
 
 
 def production_inference_pipeline(
@@ -769,8 +800,9 @@ def production_inference_pipeline(
         finally:
             db.close()
 
-        AudioService.polish(preview_wav, preview_wav, speed=speed, sample_rate=settings.OUTPUT_SAMPLE_RATE)
-        AudioService.add_ai_label_metadata(preview_wav)
+        AudioService.polish(
+            preview_wav, preview_wav, speed=speed, sample_rate=settings.OUTPUT_SAMPLE_RATE, ai_label=AudioService.AI_LABEL
+        )
         meta = AudioService.probe_audio(preview_wav)
         CleanupService.keep_only_final_outputs(job_dir, keep={"preview.wav"})
 

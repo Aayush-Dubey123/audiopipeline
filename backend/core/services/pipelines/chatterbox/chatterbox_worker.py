@@ -14,14 +14,29 @@ import torchaudio
 import torchaudio.functional as AF
 
 
+def _conditioning_source(ref_path: str):
+    """Cleaned best-window clip from AudioService (shared with the in-process path), else the raw path."""
+    try:
+        from pathlib import Path
+
+        backend_dir = str(Path(__file__).resolve().parents[4])
+        if backend_dir not in sys.path:
+            sys.path.insert(0, backend_dir)
+        from core.services.audio.audio_service import AudioService
+
+        return AudioService.conditioning_clip_buffer(Path(ref_path))
+    except Exception:
+        return ref_path
+
+
 def synthesize(
     ref_path: str,
     text: str,
     out_path: str,
     language: str = "hi",
-    temperature: float = 0.6,
-    cfg_weight: float = 0.7,
-    exaggeration: float = 0.3,
+    temperature: float = 0.75,
+    cfg_weight: float = 0.4,
+    exaggeration: float = 0.5,
     target_sample_rate: int = 24000,
     device: str = "auto",
     cache_dir: str = "",
@@ -34,9 +49,9 @@ def synthesize(
         text (str): Input text to synthesize.
         out_path (str): Destination path for the generated WAV file.
         language (str): Target language identifier code (default: 'hi').
-        temperature (float): Sampling temperature (default: 0.6).
-        cfg_weight (float): Classifier-free guidance weight (default: 0.7).
-        exaggeration (float): Expressiveness exaggeration parameter (default: 0.3).
+        temperature (float): Sampling temperature (default: 0.75).
+        cfg_weight (float): Classifier-free guidance weight (default: 0.4).
+        exaggeration (float): Expressiveness exaggeration parameter (default: 0.5).
         target_sample_rate (int): Output audio sample rate in Hz (default: 44100).
 
     Returns:
@@ -66,12 +81,12 @@ def synthesize(
     ref_hash = hashlib.sha256(ref_bytes).hexdigest()[:16]
     cache_root = Path(cache_dir) if cache_dir else Path(__file__).resolve().parents[4] / "storage" / "tmp" / "cache" / "conditionals"
     cache_root.mkdir(parents=True, exist_ok=True)
-    cache_file = cache_root / f"{ref_hash}_{int(exaggeration * 100)}.pt"
+    cache_file = cache_root / f"{ref_hash}_{int(exaggeration * 100)}_c2.pt"
 
     if cache_file.exists():
         model.conds = Conditionals.load(cache_file, map_location=device)
     else:
-        model.prepare_conditionals(ref_path, exaggeration=exaggeration)
+        model.prepare_conditionals(_conditioning_source(ref_path), exaggeration=exaggeration)
         try:
             model.conds.save(cache_file)
         except Exception:
@@ -88,11 +103,6 @@ def synthesize(
         # Chatterbox Multilingual model supports Devanagari script (shared between Hindi and Marathi)
         # under the 'hi' acoustic grapheme vocabulary.
         model_lang = "hi"
-    elif model_lang == "en":
-        # Tuned natural prosody parameters for English
-        temperature = 0.7 if temperature == 0.6 else temperature
-        cfg_weight = 0.6 if cfg_weight == 0.7 else cfg_weight
-        exaggeration = 0.35 if exaggeration == 0.3 else exaggeration
 
     # Generate audio waveform
     wav = model.generate(
@@ -156,9 +166,9 @@ def main() -> None:
     parser.add_argument("--text", required=True, help="Text to synthesize")
     parser.add_argument("--out", required=True, help="Path to output WAV file")
     parser.add_argument("--language", default="hi", help="Target language code (default: hi)")
-    parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
-    parser.add_argument("--cfg", type=float, default=0.7, help="CFG weight")
-    parser.add_argument("--exaggeration", type=float, default=0.3, help="Exaggeration strength")
+    parser.add_argument("--temperature", type=float, default=0.75, help="Sampling temperature")
+    parser.add_argument("--cfg", type=float, default=0.4, help="CFG weight")
+    parser.add_argument("--exaggeration", type=float, default=0.5, help="Exaggeration strength")
     parser.add_argument("--sample-rate", type=int, default=24000, help="Target sample rate (Hz)")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="Inference device")
     parser.add_argument("--cache-dir", default="", help="Speaker conditioning cache directory")

@@ -5,11 +5,8 @@ Write-Host "========================================================" -Foregroun
 $Root = $PSScriptRoot
 if (-not $Root) { $Root = Get-Location }
 
-# 1. Detect Python Executable
-$PythonExe = "$Root\.venv\Scripts\python.exe"
-if (-not (Test-Path $PythonExe)) {
-    $PythonExe = "$Root\backend\.venv\Scripts\python.exe"
-}
+# 1. Detect Python Executable (single project environment: backend\.venv)
+$PythonExe = "$Root\backend\.venv\Scripts\python.exe"
 if (-not (Test-Path $PythonExe)) {
     $PythonExe = "python"
 }

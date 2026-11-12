@@ -282,18 +282,17 @@ class JobController:
                 destination_dir=job_dir,
             )
 
-            # 2. Inspect acoustic reference quality
+            # 2. Transcode once into standard 24kHz mono WAV (no extra temp copies)
+            dest_wav = job_dir / "reference.wav"
+            AudioService.to_wav(temp_upload_path, dest_wav, sample_rate=24000, mono=True)
+
+            # 3. Inspect acoustic reference quality on the transcoded WAV
             quality = ValidationService.inspect_reference_audio_quality(
-                file_path=temp_upload_path,
+                file_path=dest_wav,
                 min_duration=3.0,
                 max_duration=60.0,
             )
             logging.info(f"Custom voice reference quality: score={quality.quality_score}, warnings={quality.warnings}")
-
-            # 3. Transcode reference into standard 24kHz mono WAV
-            dest_wav = job_dir / "reference.wav"
-            AudioService.to_wav(temp_upload_path, dest_wav)
-            AudioService.resample(dest_wav, dest_wav, target_sample_rate=24000)
 
         except (AudioFileSizeExceededError, InvalidAudioExtensionError, AudioDurationExceededError, ReferenceQualityError) as val_err:
             CleanupService.cleanup_job_directory(job_id)
@@ -1026,8 +1025,10 @@ class JobController:
                 language=request.language or "hi",
                 target_sample_rate=settings.OUTPUT_SAMPLE_RATE,
             )
-            AudioService.polish(out_wav, out_wav, speed=request.speed, sample_rate=settings.OUTPUT_SAMPLE_RATE)
-            AudioService.add_ai_label_metadata(out_wav)
+            AudioService.polish(
+                out_wav, out_wav, speed=request.speed, sample_rate=settings.OUTPUT_SAMPLE_RATE,
+                ai_label=AudioService.AI_LABEL,
+            )
             meta = AudioService.probe_audio(out_wav)
 
             # Persist completed job record for queries
@@ -1144,14 +1145,13 @@ class JobController:
                 upload_file=file,
                 destination_dir=job_dir,
             )
+            dest_wav = job_dir / "reference.wav"
+            AudioService.to_wav(temp_upload_path, dest_wav, sample_rate=24000, mono=True)
             ValidationService.inspect_reference_audio_quality(
-                file_path=temp_upload_path,
+                file_path=dest_wav,
                 min_duration=3.0,
                 max_duration=60.0,
             )
-            dest_wav = job_dir / "reference.wav"
-            AudioService.to_wav(temp_upload_path, dest_wav)
-            AudioService.resample(dest_wav, dest_wav, target_sample_rate=24000)
 
             ref_hash = hashlib.sha256(dest_wav.read_bytes()).hexdigest()[:16]
             logging.info(f"Custom preview reference saved: job_id='{job_id}', hash='{ref_hash}'")

@@ -272,14 +272,14 @@ AI Voice Studio builds upon foundational open-source neural synthesis and voice 
 ### Step 1: Python Environment Setup (Single Unified Environment)
 The entire application now operates within a single consolidated Python environment at the repository root:
 ```bash
-# In the repository root:
-python -m venv .venv
+# In the repository root (one environment for the whole project, inside backend/):
+python -m venv backend/.venv
 
 # Activate the virtual environment
 # Windows PowerShell:
-.venv\Scripts\Activate.ps1
+backend\.venv\Scripts\Activate.ps1
 # Linux / macOS:
-source .venv/bin/activate
+source backend/.venv/bin/activate
 
 # Install PyTorch with CUDA 12.4
 pip install torch==2.6.0+cu124 torchaudio==2.6.0+cu124 --extra-index-url https://download.pytorch.org/whl/cu124
@@ -313,8 +313,8 @@ docker compose up --build
 
 ### Step 2: Start Backend Server (Manual)
 ```bash
-# In backend directory or repository root using .venv:
-.venv\Scripts\python.exe -m uvicorn core.apis.api:app --app-dir backend --host 127.0.0.1 --port 8000
+# From the repository root:
+backend\.venv\Scripts\python.exe -m uvicorn core.apis.api:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 Backend will be live at `http://localhost:8000` with interactive API docs at `http://localhost:8000/docs`.
 
@@ -329,8 +329,8 @@ Open your browser at `http://localhost:3000` to access the AI Voice Studio inter
 
 ### Running Test Suite
 ```bash
-# Run full backend test suite (50 tests, 100% pass rate)
-.venv\Scripts\python.exe -m pytest backend/tests -v
+# Run the full backend test suite (uses a throwaway DB and storage folder; leaves no files behind)
+backend\.venv\Scripts\python.exe -m pytest backend/tests -v
 
 # Typecheck and build frontend production bundle
 cd frontend
@@ -399,4 +399,4 @@ curl http://localhost:8000/v1/health
 | `POST` | `/v1/tts/preview` | Generate instant <=200 char preview snippet | `200 OK` |
 | `GET` | `/v1/audio/preview/{id}` | Stream generated preview snippet audio | `200 OK` (audio/wav) |
 | `GET` | `/v1/audio/{id}/output` | Stream completed audio (`?format=wav\|mp3\|mp3_small`) | `200 OK` |
-| `GET` | `/v1/audio/{id}/source` | Download uploaded source audio | `200 OK` |
+| `GET` | `/v1/audio/{id}/source` | Download uploaded source audio | `200 OK` |

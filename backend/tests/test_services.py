@@ -711,3 +711,154 @@ def test_chatterbox_language_mapping_marathi() -> None:
 
 
 
+
+
+def _speech_like(sr: int, seconds: float, lead_s: float, tail_s: float, noise: float, rng) -> np.ndarray:
+    """Tone burst with silent lead/tail over a constant noise floor (a stand-in for a TTS chunk)."""
+    t = np.arange(int(sr * seconds)) / sr
+    voice = 0.4 * np.sin(2 * np.pi * 180 * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 3 * t))
+    pad = lambda s: np.zeros(int(sr * s))
+    sig = np.concatenate([pad(lead_s), voice, pad(tail_s)])
+    return (sig + noise * rng.standard_normal(sig.size)).astype(np.float32)
+
+
+def test_join_chunks_natural_trims_and_fills_gaps_with_room_tone(temp_audio_dir: Path) -> None:
+    """
+    Verify chunk joining trims each chunk's own silence, never inserts digital silence,
+    level-matches chunks, and leaves no temp files behind.
+    """
+    sr = 24000
+    rng = np.random.default_rng(1)
+    paths = []
+    for i, gain in enumerate([1.0, 0.5]):
+        p = temp_audio_dir / f"chunk_{i:04d}.wav"
+        sf.write(str(p), _speech_like(sr, 1.0, 0.6, 0.8, 0.003, rng) * gain, sr)
+        paths.append(p)
+    out = temp_audio_dir / "output.wav"
+
+    AudioService.join_chunks_natural(
+        paths, out, chunk_texts=["पहला वाक्य।", "Second one."],
+        pause_sentence_ms=350, sample_rate=sr, seed=7,
+    )
+
+    audio, out_sr = sf.read(str(out))
+    assert out_sr == sr
+    # 2 x 1.0s speech + ~0.1s kept edges + ~0.35s pause + 0.45s lead/tail, far below the 4.8s of raw chunks
+    assert 2.4 < audio.size / sr < 3.4
+    # No frame of digital silence anywhere (room tone is continuous)
+    frame = sr // 100
+    frames = audio[: audio.size // frame * frame].reshape(-1, frame)
+    assert np.sqrt(np.mean(frames ** 2, axis=1)).min() > 1e-4
+    # Level matching: the quieter chunk is raised toward the louder one
+    first, second = audio[int(0.2 * sr):int(1.1 * sr)], audio[-int(1.3 * sr):-int(0.4 * sr)]
+    ratio = np.sqrt(np.mean(first ** 2)) / np.sqrt(np.mean(second ** 2))
+    assert 0.8 < ratio < 1.25
+    assert sorted(p.name for p in temp_audio_dir.iterdir()) == ["chunk_0000.wav", "chunk_0001.wav", "output.wav"]
+
+
+def test_join_chunks_natural_pause_follows_punctuation() -> None:
+    """
+    Verify pauses scale with chunk-ending punctuation and paragraph boundaries.
+    """
+    pause = AudioService._pause_ms_for
+    assert pause("Hello there,", False, 350, 750) < pause("Hello there.", False, 350, 750)
+    assert pause("नमस्ते।", False, 350, 750) == 350
+    assert pause("Really?", False, 350, 750) > 350
+    assert pause("Anything", True, 350, 750) == 750
+
+
+def test_prepare_conditioning_clip_repairs_level_and_keeps_length(temp_audio_dir: Path) -> None:
+    """
+    Verify the conditioning clip is peak-limited to -1 dBFS, keeps the full reference length
+    (rotated, not cut), and starts on the cleanest speech-dense window.
+    """
+    sr = 24000
+    rng = np.random.default_rng(3)
+    clipped = np.clip(_speech_like(sr, 6.0, 0.0, 0.0, 0.003, rng) * 3.0, -1.0, 1.0)
+    clean = _speech_like(sr, 10.0, 0.2, 0.2, 0.003, rng)
+    silence = _speech_like(sr, 0.0, 3.0, 0.0, 0.003, rng)
+    ref = temp_audio_dir / "ref.wav"
+    sf.write(str(ref), np.concatenate([silence, clipped, clean]), sr, subtype="FLOAT")
+
+    clip = AudioService.prepare_conditioning_clip(ref, sample_rate=sr, window_s=10.0)
+
+    total = silence.size + clipped.size + clean.size
+    assert abs(clip.size - total) < sr // 100
+    assert np.max(np.abs(clip)) == pytest.approx(0.89, abs=0.01)
+    # The chosen window should begin in the unclipped section, not in the silence or clipped part
+    head = clip[: int(0.5 * sr)]
+    assert np.sqrt(np.mean(head ** 2)) < 0.35
+
+
+def test_mark_mid_sentence_cuts_adds_comma_only_mid_paragraph() -> None:
+    """
+    Verify chunks cut mid-sentence get a trailing comma while sentence and paragraph ends are untouched.
+    """
+    from core.services.jobs.job_worker import mark_mid_sentence_cuts
+
+    chunks = ["यह एक लंबा वाक्य है जो", "बीच में कटा।", "Next paragraph without stop"]
+    marked = mark_mid_sentence_cuts(chunks, {2})
+    assert marked == ["यह एक लंबा वाक्य है जो,", "बीच में कटा।", "Next paragraph without stop"]
+
+
+def test_join_chunks_natural_ignores_digital_silence_edges(temp_audio_dir: Path) -> None:
+    """
+    Verify room tone comes from the noise between words, not from the model's digitally silent edges.
+    """
+    sr = 24000
+    rng = np.random.default_rng(5)
+    paths = []
+    for i in range(2):
+        body = _speech_like(sr, 1.0, 0.0, 0.0, 0.0, rng)
+        gap = 0.005 * rng.standard_normal(int(0.4 * sr))  # ~-46 dB noise between words
+        sig = np.concatenate([np.zeros(int(0.5 * sr)), body, gap, body, np.zeros(int(0.5 * sr))])
+        p = temp_audio_dir / f"chunk_{i:04d}.wav"
+        sf.write(str(p), sig.astype(np.float32), sr)
+        paths.append(p)
+    out = temp_audio_dir / "output.wav"
+
+    AudioService.join_chunks_natural(paths, out, chunk_texts=["One.", "Two."], sample_rate=sr, seed=3)
+
+    audio, _ = sf.read(str(out))
+    frame = sr // 100
+    frames = audio[: audio.size // frame * frame].reshape(-1, frame)
+    db = 10 * np.log10(np.mean(frames ** 2, axis=1) + 1e-12)
+    # At most a frame or two dips just before a speech onset (masked); no audible dropouts
+    assert np.sum(db < -60.0) <= 4
+    assert np.percentile(db, 2) > -55.0
+
+
+def test_assess_chunk_flags_babble_truncation_and_dead_air() -> None:
+    """
+    Verify the per-chunk check passes normal speech and flags the usual zero-shot failures.
+    """
+    sr = 24000
+    rng = np.random.default_rng(11)
+    text = "यह एक सामान्य वाक्य है जो लगभग तीन सेकंड का होना चाहिए।"  # ~45 chars
+    normal = _speech_like(sr, 3.0, 0.2, 0.2, 0.002, rng)
+    assert AudioService.assess_chunk(normal, sr, text)["ok"]
+
+    babble = _speech_like(sr, 20.0, 0.2, 0.2, 0.002, rng)
+    assert "too slow" in AudioService.assess_chunk(babble, sr, text)["reason"]
+
+    truncated = _speech_like(sr, 0.8, 0.1, 0.1, 0.002, rng)
+    assert "too fast" in AudioService.assess_chunk(truncated, sr, text)["reason"]
+
+    half = _speech_like(sr, 1.5, 0.0, 0.0, 0.002, rng)
+    gap = (0.002 * rng.standard_normal(int(2.0 * sr))).astype(np.float32)
+    assert "dead air" in AudioService.assess_chunk(np.concatenate([half, gap, half]), sr, text)["reason"]
+
+
+def test_polish_writes_ai_label_in_same_encode(temp_audio_dir: Path) -> None:
+    """
+    Verify polish applies linear loudness normalisation and the AI attribution tags in one pass.
+    """
+    sr = 24000
+    src = temp_audio_dir / "joined.wav"
+    sf.write(str(src), _speech_like(sr, 3.0, 0.3, 0.3, 0.003, np.random.default_rng(2)) * 0.3, sr)
+
+    AudioService.polish(src, src, sample_rate=sr, ai_label=AudioService.AI_LABEL)
+
+    tags = " ".join(f"{k}:{v}" for k, v in AudioService.read_audio_tags(src).items()).lower()
+    assert "ai-generated" in tags
+    assert sorted(p.name for p in temp_audio_dir.iterdir()) == ["joined.wav"]

@@ -1,9 +1,8 @@
 @echo off
 echo Starting AudioPipeline Backend and Frontend...
 
-rem Detect Python executable in root .venv or backend\.venv
-set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
-if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%~dp0backend\.venv\Scripts\python.exe"
+rem Single project environment: backend\.venv
+set "PYTHON_EXE=%~dp0backend\.venv\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=python"
 
 rem Start Backend Server

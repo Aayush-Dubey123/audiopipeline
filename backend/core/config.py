@@ -79,8 +79,8 @@ class Settings(BaseSettings):
 
     # Long-form chunk pipeline settings
     CHUNK_MAX_CHARS: int = Field(default=220, description="Maximum characters per synthesis chunk")
-    CHUNK_PAUSE_SENTENCE_MS: int = Field(default=250, description="Silence gap between sentence chunks in milliseconds")
-    CHUNK_PAUSE_PARAGRAPH_MS: int = Field(default=600, description="Silence gap between paragraph chunks in milliseconds")
+    CHUNK_PAUSE_SENTENCE_MS: int = Field(default=350, description="Base pause after a sentence (ms); commas get ~45%, questions ~115%")
+    CHUNK_PAUSE_PARAGRAPH_MS: int = Field(default=750, description="Pause before a new paragraph in milliseconds")
     CHUNK_TIMEOUT_SECONDS: int = Field(default=180, description="Timeout per individual synthesis chunk in seconds")
     JOB_MAX_SECONDS: int = Field(default=7200, description="Absolute wall-clock limit for a single job (2 hours)")
 
@@ -98,6 +98,9 @@ class Settings(BaseSettings):
 
     # Inference resource policy
     CHATTERBOX_DEVICE: str = Field(default="auto", description="auto | cuda | cpu")
+    CHATTERBOX_EXAGGERATION: float = Field(default=0.5, ge=0.0, le=2.0, description="Expressiveness (model default 0.5; lower sounds flat)")
+    CHATTERBOX_CFG_WEIGHT: float = Field(default=0.4, ge=0.0, le=1.0, description="Guidance strength; lower follows the reference's pace and accent more closely")
+    CHATTERBOX_TEMPERATURE: float = Field(default=0.75, ge=0.05, le=2.0, description="Sampling temperature")
     OUTPUT_SAMPLE_RATE: int = Field(default=24000, description="Output WAV sample rate (model native 24 kHz = smallest, no quality loss)")
     MODEL_IDLE_UNLOAD_SECONDS: int = Field(default=300, description="Free GPU memory after this many idle seconds (0 = never)")
 
