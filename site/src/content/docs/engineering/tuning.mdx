@@ -1,0 +1,60 @@
+---
+title: Tuning by measurement
+description: How the generation settings were chosen with 17 GPU runs, and why the best-looking result was rejected.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import BarCompare from '../../../components/BarCompare.astro';
+
+Chatterbox exposes three settings that shape the voice:
+
+| Setting | What it does | Too low | Too high |
+|---|---|---|---|
+| **exaggeration** | Expressiveness / emotional intensity | Flat, “reading” voice | Over-acted, unstable |
+| **cfg_weight** | How strongly generation follows the guidance | Loose, follows the reference’s pace and accent | Slow, over-articulated |
+| **temperature** | Randomness when sampling speech tokens | Monotone, repetitive | Erratic |
+
+I can’t judge a voice by ear for every combination, so I scored them.
+
+## The scoring
+
+Each combination generated the same three Hindi chunks with fixed seeds, scored on:
+
+- **Speaker similarity** to the reference (the model’s own voice encoder).
+- **Pitch movement**: how much the voice rises and falls, compared with the real speaker.
+- **Pace**: onset rate (a syllable proxy) compared with the real speaker.
+- **Failed chunks**, from the new chunk check.
+
+## What the sweep showed
+
+<BarCompare
+	title="Speaker similarity (stable settings vs 0.65)"
+	rows={[
+		{ label: '0.5 / 0.4 (chosen)', value: 0.9459, display: '0.946', best: true },
+		{ label: '0.4 / 0.3', value: 0.9504, display: '0.950' },
+		{ label: '0.65 / 0.4', value: 0.9567, display: '0.957', warn: true },
+		{ label: '0.65 / 0.5', value: 0.9552, display: '0.955', warn: true },
+	]}
+	note="exaggeration / cfg_weight at temperature 0.75. The 0.65 rows look best, but read on."
+/>
+
+<Aside type="danger" title="The best score was a trap">
+	At exaggeration 0.65, one chunk in every run **babbled for 35–40 seconds** on text that should take about 13. The chunk check flagged it, and the babble had also inflated the pitch and pace scores. A setting that fails that often is not usable, however good its average looks.
+</Aside>
+
+## Seeds matter as much as settings
+
+Re-running the two best stable options with a second set of random seeds:
+
+| Settings | Similarity | Pitch movement (reference 5.53) | Failed chunks |
+|---|---|---|---|
+| **0.5 / 0.4 / 0.75** (chosen) | 0.946 – 0.955 | 3.2 – 4.3 | **0 of 6** |
+| 0.4 / 0.3 / 0.85 | 0.952 – 0.955 | 3.7 – 4.8 | 1 of 6 |
+
+Changing only the seed moved the scores as much as changing the settings. The chosen values were the only ones with no failures, so they stayed.
+
+## The real limit
+
+Every stable setting is still a little flatter than the real speaker (about 30% less pitch movement), because the model takes speaking style from only 6–10 seconds of reference. The biggest remaining lever is **a better reference recording** (15–30 s of natural, expressive speech, no clipping, quiet room), not more tuning.
+
+Next: [why it isn’t online 24/7](../hosting/).

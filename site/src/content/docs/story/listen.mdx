@@ -1,0 +1,36 @@
+---
+title: 'Listen: before & after'
+description: The same text and voice through the original and the improved pipeline, in English and Hindi.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import AudioCompare from '../../../components/AudioCompare.astro';
+
+<Aside title="About these samples">
+	These clips use the model’s **built-in demo voice**, not a real person, so they can be shared publicly. Both versions use the same text, the same voice and the same GPU; only the pipeline differs. Headphones make the gaps easier to hear.
+</Aside>
+
+## English
+
+<AudioCompare lang="en" title="“Every voice tells a story…”" showText />
+
+## Hindi · हिन्दी
+
+<AudioCompare lang="hi" title="“हर आवाज़ की अपनी एक पहचान होती है…”" showText />
+
+## What to listen for
+
+| Moment | Before | After |
+|---|---|---|
+| Between sentences | Background hiss cuts to dead silence, then returns | Continuous room tone; the pause sounds like a breath |
+| Pause lengths | Same fixed gap everywhere | Shorter after commas, longer after questions and paragraphs |
+| Delivery | Even, careful, slightly flat | More natural rise and fall |
+| Loudness | Swells in pauses | One steady level |
+
+<Aside type="note">
+	The red **dead silence** chip under each waveform counts milliseconds of perfect digital silence, the most reliable splice detector I found. The waveform is clickable: jump to any moment, then flip versions.
+</Aside>
+
+<Aside type="caution" title="What these samples can’t show">
+	The biggest gains came from cleaning the **cloning reference** (fixes 1–2), which a built-in voice doesn’t use. Those were measured on the client voice: similarity 0.933 → 0.944 and digital silence 2,930 ms → 130 ms on a 69 s narration.
+</Aside>

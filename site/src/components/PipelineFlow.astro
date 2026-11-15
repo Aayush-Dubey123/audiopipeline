@@ -1,0 +1,106 @@
+---
+/** The synthesis pipeline as a responsive step flow. `fresh` marks stages added in the quality pass. */
+const steps = [
+	{ n: 1, name: 'Script cleanup', detail: 'Punctuation, abbreviations, markdown, numbers', where: 'CPU', fresh: false },
+	{ n: 2, name: 'Smart chunking', detail: 'Sentence & Danda (।) aware, ≤220 chars; mid-sentence cuts keep a comma', where: 'CPU', fresh: true },
+	{ n: 3, name: 'Voice conditioning clip', detail: 'De-clip, de-rumble, light denoise, pick the best 10 s window', where: 'CPU', fresh: true },
+	{ n: 4, name: 'Chatterbox synthesis', detail: 'Resident model, cached voice conditioning, tuned settings', where: 'GPU', fresh: false },
+	{ n: 5, name: 'Chunk check', detail: 'Babble, truncation and dead-air detection; one retry with a new seed', where: 'CPU', fresh: true },
+	{ n: 6, name: 'Natural joining', detail: 'Trim, level-match, pauses by punctuation, filled with room tone', where: 'CPU', fresh: true },
+	{ n: 7, name: 'Polish & label', detail: 'Two-pass loudness to −16 LUFS + AI-attribution tags in one encode', where: 'CPU', fresh: true },
+	{ n: 8, name: 'Deliver', detail: 'Exactly two files: WAV master + MP3', where: 'CPU', fresh: false },
+];
+---
+
+<ol class="ap-flow" aria-label="Synthesis pipeline">
+	{
+		steps.map((s) => (
+			<li class:list={['ap-flow-step', { 'is-gpu': s.where === 'GPU', 'is-fresh': s.fresh }]}>
+				<span class="ap-flow-n">{s.n}</span>
+				<div>
+					<div class="ap-flow-name">
+						{s.name}
+						<span class="ap-flow-where">{s.where}</span>
+						{s.fresh && <span class="ap-flow-new">improved</span>}
+					</div>
+					<p class="ap-flow-detail">{s.detail}</p>
+				</div>
+			</li>
+		))
+	}
+</ol>
+
+<style>
+	.ap-flow {
+		list-style: none;
+		padding: 0;
+		margin: 1.5rem 0;
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+		gap: 0.75rem;
+		counter-reset: none;
+	}
+	.ap-flow-step {
+		margin: 0 !important;
+		display: flex;
+		gap: 0.75rem;
+		align-items: flex-start;
+		background: var(--ap-card);
+		border: 1px solid var(--ap-card-border);
+		border-radius: var(--ap-radius);
+		padding: 0.9rem 1rem;
+		position: relative;
+	}
+	.ap-flow-step.is-gpu {
+		border-color: var(--sl-color-accent);
+		box-shadow: 0 0 0 1px var(--sl-color-accent) inset;
+	}
+	.ap-flow-n {
+		flex: none;
+		width: 1.8rem;
+		height: 1.8rem;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		font-size: 0.8rem;
+		font-weight: 700;
+		background: var(--sl-color-gray-6);
+		color: var(--sl-color-gray-1);
+	}
+	.is-gpu .ap-flow-n {
+		background: var(--sl-color-accent);
+		color: var(--sl-color-black);
+	}
+	.ap-flow-name {
+		font-weight: 650;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		align-items: center;
+		line-height: 1.3;
+	}
+	.ap-flow-where,
+	.ap-flow-new {
+		font-size: 0.65rem;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		padding: 0.1rem 0.45rem;
+		border-radius: 999px;
+		background: var(--sl-color-gray-6);
+		color: var(--sl-color-gray-2);
+	}
+	.is-gpu .ap-flow-where {
+		background: var(--sl-color-accent-low);
+		color: var(--sl-color-accent-high);
+	}
+	.ap-flow-new {
+		background: var(--ap-amber-soft);
+		color: var(--ap-amber);
+	}
+	.ap-flow-detail {
+		margin: 0.25rem 0 0 !important;
+		font-size: 0.85rem;
+		color: var(--sl-color-gray-2);
+		line-height: 1.45;
+	}
+</style>

@@ -1,0 +1,71 @@
+---
+/** Headline numbers as cards. `from` shows the previous value struck through. */
+interface Stat {
+	value: string;
+	label: string;
+	from?: string;
+	note?: string;
+}
+interface Props {
+	stats: Stat[];
+}
+const { stats } = Astro.props;
+---
+
+<div class="ap-stats">
+	{
+		stats.map((s) => (
+			<div class="ap-stat ap-card">
+				<div class="ap-stat-value">
+					{s.from && <span class="ap-stat-from">{s.from}</span>}
+					{s.value}
+				</div>
+				<div class="ap-stat-label">{s.label}</div>
+				{s.note && <div class="ap-stat-note">{s.note}</div>}
+			</div>
+		))
+	}
+</div>
+
+<style>
+	.ap-stats {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+		gap: 0.75rem;
+		margin-block: 1.5rem;
+	}
+	.ap-stat {
+		margin: 0 !important;
+		padding: 1rem 1.1rem;
+	}
+	.ap-stat-value {
+		font-size: 1.75rem;
+		font-weight: 750;
+		letter-spacing: -0.02em;
+		color: var(--sl-color-accent-high);
+		line-height: 1.1;
+		display: flex;
+		align-items: baseline;
+		gap: 0.45rem;
+		flex-wrap: wrap;
+	}
+	:root[data-theme='light'] .ap-stat-value {
+		color: var(--sl-color-accent);
+	}
+	.ap-stat-from {
+		font-size: 0.95rem;
+		font-weight: 500;
+		color: var(--sl-color-gray-3);
+		text-decoration: line-through;
+	}
+	.ap-stat-label {
+		margin-top: 0.35rem !important;
+		font-weight: 600;
+		font-size: 0.9rem;
+	}
+	.ap-stat-note {
+		margin-top: 0.2rem !important;
+		font-size: 0.78rem;
+		color: var(--sl-color-gray-3);
+	}
+</style>

@@ -1,0 +1,113 @@
+---
+/** Small horizontal bar chart. `best` highlights the winning row; `lowerIsBetter` only affects the caption. */
+interface Row {
+	label: string;
+	value: number;
+	display?: string;
+	best?: boolean;
+	warn?: boolean;
+}
+interface Props {
+	title: string;
+	unit?: string;
+	rows: Row[];
+	lowerIsBetter?: boolean;
+	note?: string;
+}
+const { title, unit = '', rows, lowerIsBetter = false, note } = Astro.props;
+const max = Math.max(...rows.map((r) => r.value)) || 1;
+---
+
+<figure class="ap-bars ap-card">
+	<figcaption>
+		<strong>{title}</strong>
+		<span>{lowerIsBetter ? 'lower is better' : 'higher is better'}</span>
+	</figcaption>
+	<ul>
+		{
+			rows.map((r) => (
+				<li class:list={{ best: r.best, warn: r.warn }}>
+					<span class="ap-bars-label">{r.label}</span>
+					<span class="ap-bars-track">
+						<span class="ap-bars-fill" style={`width:${Math.max((r.value / max) * 100, 2)}%`} />
+					</span>
+					<span class="ap-bars-value">{r.display ?? `${r.value}${unit}`}</span>
+				</li>
+			))
+		}
+	</ul>
+	{note && <p class="ap-bars-note">{note}</p>}
+</figure>
+
+<style>
+	.ap-bars {
+		margin-block: 1.5rem;
+	}
+	figcaption {
+		display: flex;
+		justify-content: space-between;
+		gap: 1rem;
+		flex-wrap: wrap;
+		margin-bottom: 0.75rem;
+	}
+	figcaption span {
+		font-size: 0.75rem;
+		color: var(--sl-color-gray-3);
+	}
+	ul {
+		list-style: none;
+		padding: 0;
+		margin: 0 !important;
+		display: grid;
+		gap: 0.55rem;
+	}
+	li {
+		margin: 0 !important;
+		display: grid;
+		grid-template-columns: minmax(6rem, 9rem) 1fr auto;
+		align-items: center;
+		gap: 0.75rem;
+		font-size: 0.85rem;
+	}
+	.ap-bars-track {
+		height: 0.7rem;
+		background: var(--sl-color-gray-6);
+		border-radius: 999px;
+		overflow: hidden;
+	}
+	.ap-bars-fill {
+		display: block;
+		height: 100%;
+		border-radius: 999px;
+		background: var(--sl-color-gray-4);
+	}
+	li.best .ap-bars-fill {
+		background: var(--sl-color-accent);
+	}
+	li.warn .ap-bars-fill {
+		background: var(--ap-red);
+	}
+	li.best .ap-bars-label,
+	li.best .ap-bars-value {
+		font-weight: 700;
+	}
+	.ap-bars-value {
+		font-variant-numeric: tabular-nums;
+		min-width: 3.5rem;
+		text-align: right;
+	}
+	.ap-bars-note {
+		margin: 0.75rem 0 0 !important;
+		font-size: 0.8rem;
+		color: var(--sl-color-gray-3);
+	}
+	@media (max-width: 30rem) {
+		li {
+			grid-template-columns: 1fr auto;
+		}
+		.ap-bars-track {
+			grid-column: 1 / -1;
+			grid-row: 2;
+		}
+	}
+</style>

@@ -1,0 +1,35 @@
+---
+title: Audio basics
+description: The audio and ML concepts behind this project, explained briefly.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A short glossary of everything this project leans on. Each entry says **why it mattered here**.
+
+## Sound and signals
+
+- **Sample rate**: How many times per second the waveform is measured. Chatterbox works at **24 kHz** (24,000 samples/s), which covers speech well; upsampling to 44.1 kHz adds file size, not quality.
+- **dBFS (decibels relative to full scale)**: Digital level, where 0 dBFS is the loudest possible sample. The client reference **peaked at 0 dBFS**: a red flag for clipping.
+- **Clipping**: When a waveform hits the ceiling and gets flattened. It sounds harsh, and a cloning model faithfully copies it, so it is repaired *before* conditioning.
+- **Noise floor / room tone**: The quiet hiss present in every real recording. Humans don’t notice it until it **disappears**, which is exactly what digital-silence gaps did.
+- **Digital silence**: Samples that are exactly zero. Real rooms are never that quiet, so short stretches of it are a strong “spliced” signal.
+- **LUFS**: Perceived loudness over time. Streaming platforms target around −14 to −16 LUFS. **Two-pass** normalisation measures first, then applies one fixed gain, so pauses don’t get boosted.
+
+## Speech generation
+
+- **Zero-shot voice cloning**: Imitating a voice from a short sample without training on it. The model extracts a *speaker embedding* (identity) and *prompt tokens* (speaking style) from the reference.
+- **Conditioning window**: The part of the reference the model actually looks at. For Chatterbox, **6 s for style and 10 s for timbre**, which is why picking the best window mattered so much.
+- **Chunking**: Splitting long text into short passages the model handles reliably. The art is in where you cut, and how you join them back.
+- **Exaggeration · CFG weight · Temperature**: The three dials of the voice. See [Tuning by measurement](../../engineering/tuning/).
+- **Seed**: The starting point of the random sampling. Same seed, same settings and same text give the same audio, which is essential for fair A/B tests.
+
+## Measuring quality
+
+- **Speaker similarity**: Cosine similarity between voice embeddings of the output and the reference (1.0 = identical). Useful, but it can’t hear splices or flat delivery.
+- **Real-time factor (RTF)**: Compute time divided by audio duration. RTF 1.3 means 13 seconds to generate 10 seconds of speech.
+- **VRAM**: GPU memory. The model, its activations and the CUDA cache must all fit, here in 6 GB.
+
+<Aside type="tip">
+	The most useful lesson: a single number (similarity) said “fine” while listeners said “fake”. Pair metrics with listening, and when you can’t listen, measure what listeners notice: silence, pitch movement, pace.
+</Aside>

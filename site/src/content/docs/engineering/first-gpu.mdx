@@ -1,0 +1,75 @@
+---
+title: Built on my first GPU
+description: What building an ML pipeline on a 6 GB, 35 W laptop GPU taught me about memory, speed and measuring instead of assuming.
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+import BarCompare from '../../../components/BarCompare.astro';
+import StatGrid from '../../../components/StatGrid.astro';
+
+This was my first project built around a GPU. Every number on this page was measured on one machine, a gaming laptop, not a cloud server.
+
+<StatGrid
+	stats={[
+		{ value: 'RTX 3050', label: 'Laptop GPU', note: '6 GB VRAM · ~35 W power limit' },
+		{ value: '16 GB', label: 'System RAM', note: 'Intel Core i5-12450HX, 8 cores' },
+		{ value: '3.8 GB', label: 'Peak VRAM in use', note: 'model + activations, per chunk' },
+		{ value: '≈1.3×', label: 'Real-time factor', note: 'seconds of compute per second of audio, warm' },
+	]}
+/>
+
+## Lesson 1: keep the model loaded
+
+The first version ran each chunk in a fresh worker process. That is clean and isolated, but it **reloaded the whole model for every chunk**. Moving to a single resident model, plus a speaker-conditioning cache keyed by the reference’s content hash, turned model setup from a per-chunk cost into a once-per-session cost.
+
+<BarCompare
+	title="Seconds of compute per second of audio"
+	lowerIsBetter
+	rows={[
+		{ label: 'Per-chunk worker (v0)', value: 4.4, display: '≈4.4×', warn: true },
+		{ label: 'Resident model, warm', value: 1.3, display: '≈1.3×', best: true },
+	]}
+	note="v0 figure from the project’s early benchmark log; resident figure from a 7-chunk end-to-end job (first chunk excluded, since it includes warm-up)."
+/>
+
+## Lesson 2: “faster” settings can be slower
+
+Mixed precision (fp16/bf16) is the textbook speed-up. I added it behind a setting and benchmarked it on the same chunks and seeds before turning it on:
+
+<BarCompare
+	title="Real-time factor by precision (4 Hindi chunks, 47 s of audio)"
+	lowerIsBetter
+	rows={[
+		{ label: 'Full precision', value: 1.38, display: '1.38×', best: true },
+		{ label: 'bf16 autocast', value: 2.83, display: '2.83×', warn: true },
+		{ label: 'fp16 autocast', value: 3.34, display: '3.34×', warn: true },
+	]}
+	note="Mixed precision also raised peak VRAM from 3.85 GB to 4.82 GB. The option was removed entirely, not just turned off."
+/>
+
+<Aside type="tip">
+	On small laptop GPUs the token-by-token generation loop is dominated by overheads that casting makes worse. **Measure on your own hardware before trusting a rule of thumb.**
+</Aside>
+
+## Lesson 3: memory is a budget, not a limit
+
+<CardGrid>
+	<Card title="One job at a time" icon="list-format">
+		A single-worker queue guarantees two jobs never fight over 6 GB.
+	</Card>
+	<Card title="Release once, not always" icon="random">
+		Clearing the CUDA cache after every chunk slowed things down; once per job is enough.
+	</Card>
+	<Card title="Unload when idle" icon="moon">
+		After 5 idle minutes the model is unloaded, so the laptop is usable for other work.
+	</Card>
+	<Card title="Bounded caches" icon="setting">
+		Voice conditionals are kept in a small LRU in memory and capped on disk.
+	</Card>
+</CardGrid>
+
+## Lesson 4: the CPU does most of the work
+
+Only text-to-speech generation touches the GPU. Cleaning the reference, checking chunks, joining, loudness and encoding are all fast CPU/NumPy/FFmpeg work. Keeping them off the GPU is a big part of why a 6 GB card is enough.
+
+Next: [tuning by measurement](../tuning/).

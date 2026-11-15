@@ -1,0 +1,69 @@
+---
+title: How it works
+description: From script to finished narration, stage by stage.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+import PipelineFlow from '../../../components/PipelineFlow.astro';
+
+## The big picture
+
+A request flows through four layers: **API → controller → job queue → pipeline services**. The GPU is a shared, scarce resource, so exactly **one** synthesis job runs at a time, and the model stays loaded between chunks and jobs.
+
+<PipelineFlow />
+
+<Aside>
+	Only stage 4 touches the GPU. Everything else is plain CPU work, which is why the whole pipeline fits on a 6 GB laptop card.
+</Aside>
+
+## Stage by stage
+
+<Steps>
+
+1. **Script cleanup.** Smart quotes, dashes, markdown leftovers and repeated punctuation are normalised; English abbreviations, months and currencies are expanded so the model never has to guess how to say `$5` or `Dr.`.
+
+2. **Chunking.** Chatterbox works best on short passages, so text is split on sentence ends, including the Hindi Danda `।` and double Danda `॥`, while skipping abbreviations and decimals. Chunks stay under ~220 characters. If a long sentence must be cut, the cut lands on a comma or space, and the chunk gets a trailing comma so the voice keeps a *continuing* intonation instead of a full stop.
+
+3. **Voice conditioning.** The reference recording is cleaned (clipping repaired, rumble removed, light denoise) and the best 10-second window is moved to the front, because the model only looks at the first 6–10 seconds. The result is cached by content hash, so this happens once per voice.
+
+4. **Synthesis.** The resident Chatterbox model generates each chunk with tuned expressiveness, guidance and temperature. Progress, ETA and resumable chunk files are tracked per job.
+
+5. **Chunk check.** A cheap, GPU-free check catches the usual failure modes: babbling (far too slow for the text), truncation (far too fast), the 40-second generation cap, or long dead air. A failed chunk is regenerated once with a new seed, and the better take is kept.
+
+6. **Natural joining.** Each chunk’s own silence is trimmed, loudness is matched, and pauses are sized by punctuation: commas short, questions a bit longer, paragraphs longest, with slight variation. Pauses are filled with the recording’s own **room tone**, never digital silence.
+
+7. **Polish & label.** Loudness is measured once, then a single fixed gain brings the whole file to −16 LUFS, without pumping. The same encode writes AI-attribution metadata.
+
+8. **Deliver.** The job folder ends with exactly two files: a WAV master and an MP3. Chunks, temp files and the uploaded reference are removed.
+
+</Steps>
+
+## Under the hood
+
+<Tabs>
+	<TabItem label="Stack">
+		| Layer | Technology |
+		|---|---|
+		| API | FastAPI, Pydantic v2, security headers, per-IP rate limits |
+		| Persistence | SQLAlchemy 2.0 + SQLite (jobs, chunk progress, voices) |
+		| Queue | Single-worker GPU-safe FIFO with timeouts and an idle janitor |
+		| Model | Chatterbox Multilingual (Resemble AI), PyTorch 2.6 + CUDA 12.4 |
+		| Audio | FFmpeg, NumPy, SoundFile, librosa |
+		| Frontend | React 19 + TypeScript + Vite |
+		| Tests | pytest, 80 tests, isolated temp DB and storage |
+	</TabItem>
+	<TabItem label="Request lifecycle">
+		1. `POST /v1/tts` validates text, language and voice, checks quotas, creates a job.
+		2. The job enters the single GPU queue; the UI polls `GET /v1/jobs/{id}` for chunk progress and ETA.
+		3. If interrupted, `POST /v1/jobs/{id}/resume` continues from the last finished chunk.
+		4. `GET /v1/audio/{id}/output?format=mp3` streams the result.
+	</TabItem>
+	<TabItem label="Design rules">
+		- One GPU job at a time; the model stays resident, with an idle unload after 5 minutes.
+		- No junk: every stage cleans up after itself; tests run in a throwaway folder.
+		- Every output is labelled as AI-generated and carries an inaudible watermark.
+		- Filesystem paths are never exposed by the public API.
+	</TabItem>
+</Tabs>
+
+Next: [what I fixed, and the evidence](../fixes/).

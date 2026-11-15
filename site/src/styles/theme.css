@@ -1,0 +1,142 @@
+/* AudioPipeline theme: teal accent (voice / signal) with a warm amber highlight. */
+
+/* Dark mode (Starlight default) */
+:root {
+	--sl-font: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--sl-color-accent-low: #0b2f2c;
+	--sl-color-accent: #14b8a6;
+	--sl-color-accent-high: #99f6e4;
+	--sl-color-white: #ffffff;
+	--sl-color-gray-1: #e8eceb;
+	--sl-color-gray-2: #c3cbca;
+	--sl-color-gray-3: #8a9796;
+	--sl-color-gray-4: #556362;
+	--sl-color-gray-5: #34403f;
+	--sl-color-gray-6: #1c2524;
+	--sl-color-black: #111716;
+
+	--ap-amber: #fbbf24;
+	--ap-amber-soft: rgba(251, 191, 36, 0.14);
+	--ap-red: #f87171;
+	--ap-red-soft: rgba(248, 113, 113, 0.14);
+	--ap-green: #34d399;
+	--ap-card: #182120;
+	--ap-card-border: #2a3534;
+	--ap-wave-before: #f87171;
+	--ap-wave-after: #2dd4bf;
+	--ap-radius: 14px;
+}
+
+/* Light mode */
+:root[data-theme='light'] {
+	--sl-color-accent-low: #ccfbf1;
+	--sl-color-accent: #0f766e;
+	--sl-color-accent-high: #134e4a;
+	--sl-color-white: #111716;
+	--sl-color-gray-1: #1c2524;
+	--sl-color-gray-2: #34403f;
+	--sl-color-gray-3: #556362;
+	--sl-color-gray-4: #8a9796;
+	--sl-color-gray-5: #c3cbca;
+	--sl-color-gray-6: #e8eceb;
+	--sl-color-gray-7: #f4f7f6;
+	--sl-color-black: #ffffff;
+
+	--ap-amber: #b45309;
+	--ap-amber-soft: rgba(217, 119, 6, 0.1);
+	--ap-red: #dc2626;
+	--ap-red-soft: rgba(220, 38, 38, 0.08);
+	--ap-green: #047857;
+	--ap-card: #ffffff;
+	--ap-card-border: #dbe3e1;
+	--ap-wave-before: #ef4444;
+	--ap-wave-after: #0d9488;
+}
+
+/* Splash hero polish */
+.hero h1 {
+	letter-spacing: -0.03em;
+	line-height: 1.05;
+}
+.hero .tagline {
+	max-width: 38rem;
+}
+
+/* Shared card look for custom components */
+.ap-card {
+	background: var(--ap-card);
+	border: 1px solid var(--ap-card-border);
+	border-radius: var(--ap-radius);
+	padding: 1.25rem;
+}
+
+.ap-eyebrow {
+	font-size: 0.75rem;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--sl-color-accent);
+}
+
+.sl-markdown-content :is(td, th) {
+	vertical-align: top;
+}
+
+/* Hero illustration: animated voice bars */
+.ap-hero-art {
+	width: min(100%, 22rem);
+	aspect-ratio: 1;
+	display: grid;
+	place-items: center;
+	border-radius: 28px;
+	background:
+		radial-gradient(circle at 30% 25%, rgba(20, 184, 166, 0.35), transparent 60%),
+		radial-gradient(circle at 75% 80%, rgba(251, 191, 36, 0.22), transparent 55%),
+		var(--ap-card);
+	border: 1px solid var(--ap-card-border);
+}
+.ap-hero-art svg {
+	width: 78%;
+}
+.ap-hero-art rect {
+	fill: var(--sl-color-accent);
+	transform-box: fill-box;
+	transform-origin: center;
+	animation: ap-pulse 1.6s ease-in-out infinite;
+}
+.ap-hero-art rect:nth-child(3n) {
+	fill: var(--ap-amber);
+}
+.ap-hero-art rect:nth-child(2) { animation-delay: -0.2s; }
+.ap-hero-art rect:nth-child(3) { animation-delay: -0.4s; }
+.ap-hero-art rect:nth-child(4) { animation-delay: -0.6s; }
+.ap-hero-art rect:nth-child(5) { animation-delay: -0.8s; }
+.ap-hero-art rect:nth-child(6) { animation-delay: -1s; }
+.ap-hero-art rect:nth-child(7) { animation-delay: -1.2s; }
+.ap-hero-art rect:nth-child(8) { animation-delay: -1.4s; }
+.ap-hero-art rect:nth-child(9) { animation-delay: -0.3s; }
+.ap-hero-art rect:nth-child(10) { animation-delay: -0.7s; }
+.ap-hero-art rect:nth-child(11) { animation-delay: -1.1s; }
+@keyframes ap-pulse {
+	0%, 100% { transform: scaleY(0.45); }
+	50% { transform: scaleY(1); }
+}
+.ap-hero-badge {
+	margin-top: 1rem;
+	display: inline-flex;
+	gap: 0.4rem;
+	align-items: center;
+	font-size: 0.78rem;
+	font-weight: 600;
+	padding: 0.3rem 0.75rem;
+	border-radius: 999px;
+	background: var(--sl-color-accent-low);
+	color: var(--sl-color-accent-high);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	* {
+		animation: none !important;
+		transition: none !important;
+	}
+}

@@ -1,0 +1,143 @@
+---
+title: What I fixed
+description: Twelve weak points that made the clone sound synthetic, the evidence for each, and the measured result.
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+import FixCard from '../../../components/FixCard.astro';
+import StatGrid from '../../../components/StatGrid.astro';
+
+Every fix below started with evidence: a line in the model’s source code, a measurement of the reference audio, or an A/B test on the GPU. Numbers marked *client voice* were measured on the real client reference (not published here for consent reasons; see [Responsible use](../../guides/responsible-use/)).
+
+<StatGrid
+	stats={[
+		{ from: '2,930 ms', value: '130 ms', label: 'Digital silence', note: '7-chunk Hindi narration, client voice' },
+		{ from: '0.933', value: '0.944', label: 'Speaker similarity', note: 'same text, same seeds' },
+		{ from: '3 runs', value: '1', label: 'FFmpeg passes per upload', note: 'and zero temp files' },
+	]}
+/>
+
+## The voice reference <Badge text="Phase 1" variant="note" />
+
+<FixCard
+	n={1}
+	area="Reference"
+	title="Only the first 6–10 seconds of the reference were used"
+	problem="The model takes speaking style from the first 6 s and timbre/room sound from the first 10 s of the reference. Whatever happened to be at the start of a 27.6 s file decided the clone, including distorted parts."
+	evidence="Found in the model source: ENC_COND_LEN = 6 s and DEC_COND_LEN = 10 s; only the speaker embedding sees the whole file."
+	fix="Score every 10 s window (speech density, clipping, quiet edges) and rotate the best one to the front, so the rest still feeds the speaker embedding."
+	result="For the client voice the 8.3–18.3 s window was chosen automatically; the clip is built in memory and cached once per voice."
+/>
+
+<FixCard
+	n={2}
+	area="Reference"
+	title="The reference was clipped and noisy, and the model copied both"
+	problem="The decoder faithfully reproduces distortion and hiss from the reference."
+	evidence="Measured: peak at 0 dBFS, 235 hard-clipped samples, constant background noise around −40 dB."
+	fix="Repair clipping, remove low rumble (<70 Hz), apply only mild denoising (heavy denoise sounds robotic) and peak at −1 dBFS."
+	result="285 clipped samples repaired before conditioning; uploads are converted once, straight to 24 kHz mono."
+/>
+
+## Generation settings <Badge text="Phase 2" variant="note" />
+
+<FixCard
+	n={3}
+	area="Settings"
+	title="Expressiveness was set below the model’s default"
+	problem="exaggeration = 0.3 (default 0.5) produced a flat, careful ‘reading’ voice; cfg_weight = 0.7 forced slow, over-articulated pacing on a fast speaker. Values were hard-coded in two places with hidden English overrides."
+	fix="Moved to configuration (0.5 / 0.4 / 0.75), removed the overrides, and tuned by measurement across 17 GPU runs."
+	result="Stable, more natural delivery; a sweep showed 0.65+ starts to babble on this voice, so the safe range is documented."
+/>
+
+<FixCard
+	n={4}
+	area="Settings"
+	title="Bad chunks went straight into the final file"
+	problem="Each chunk was sampled once. Mumbles, repeats, cut-off endings or 40 s babbles were never caught."
+	fix="A GPU-free check per chunk: speech rate vs text length, the 40 s generation cap, and dead air > 1.2 s. On failure: one retry with a new seed, keep the better take."
+	result="Normal chunks cost nothing extra; failures are caught. In the sweep, every real babble was flagged."
+/>
+
+## Stitching chunks together <Badge text="Phase 3" variant="note" />
+
+<FixCard
+	n={5}
+	area="Joining"
+	title="Gaps between chunks were perfect digital silence"
+	problem="Chunks were concatenated with generated zero-silence. The voice carries room noise at about −45 dB, so every few seconds the background vanished and came back: the classic splice sound."
+	evidence="2,930 ms of exact digital silence in a 69 s narration."
+	fix="Fill pauses with the recording’s own room tone, overlap-added from the quiet moments between words, with equal-power fades at every boundary."
+	result="Digital silence fell from 2,930 ms to 130 ms; the noise floor is continuous."
+/>
+
+<FixCard
+	n={6}
+	area="Joining"
+	title="Pauses were uneven and mechanical"
+	problem="Each chunk kept its own leading/trailing silence and then a fixed 250 ms or 600 ms was added on top."
+	fix="Trim each chunk to its speech (+40/60 ms), then size pauses by punctuation: comma ≈160 ms, sentence 350 ms, question ≈400 ms, paragraph 750 ms, with ±15% deterministic variation."
+	result="Rhythm follows the text instead of the chunk boundaries."
+/>
+
+<FixCard
+	n={7}
+	area="Joining"
+	title="The voice dropped at mid-sentence cuts"
+	problem="When a long sentence had to be split, the model appended a full stop, so the voice fell as if the sentence had ended."
+	fix="Mid-sentence chunks get a trailing comma, keeping a continuing intonation."
+	result="Long sentences now flow across chunk boundaries."
+/>
+
+<FixCard
+	n={8}
+	area="Joining"
+	title="Volume jumped from chunk to chunk"
+	problem="Chunks were not level-matched before joining."
+	fix="Each chunk’s speech level is matched to the median (within ±6 dB, peak-safe)."
+	result="Even loudness across the whole narration."
+/>
+
+## Polish and speed <Badge text="Phases 4–5" variant="note" />
+
+<FixCard
+	n={9}
+	area="Loudness"
+	title="Loudness normalisation pumped the background"
+	problem="Single-pass loudnorm rides the gain like an automatic volume control, lifting the noise in every pause."
+	fix="Measure once, then apply one fixed gain (linear mode) to −16 LUFS, in the same encode that writes the AI-attribution tags."
+	result="Natural dynamics, and one file rewrite instead of two."
+/>
+
+<FixCard
+	n={10}
+	area="Speed"
+	title="GPU memory was released after every chunk"
+	problem="torch.cuda.empty_cache() after each chunk forced the allocator to rebuild its memory pool every time."
+	fix="Release once per job; the model stays resident and an idle janitor unloads it after 5 minutes."
+	result="Steady ≈1.3× real-time once warm."
+/>
+
+<FixCard
+	n={11}
+	area="Efficiency"
+	title="The same work was repeated on every chunk"
+	problem="The reference file was re-read and re-hashed for every chunk; uploads took up to three FFmpeg runs and two temp files."
+	fix="Hash once per file version; convert uploads in one pass; check function signatures once per job."
+	result="Less disk and CPU work per job; no stray files."
+/>
+
+<FixCard
+	n={12}
+	area="Hygiene"
+	title="Tests were writing into the real database and storage"
+	problem="Every test run left job folders in storage and rows in the live database."
+	fix="The suite now runs against a throwaway database and folder that are deleted at the end."
+	result="80 tests pass and leave nothing behind."
+/>
+
+<Aside type="caution" title="What did NOT help">
+	Mixed precision (fp16 / bf16) looked like an obvious speed win. Measured on this GPU it was **2–2.4× slower** and used **≈1 GB more** memory, so it was removed. See [Built on my first GPU](../../engineering/first-gpu/).
+</Aside>
+
+Now [listen to the result](../listen/).

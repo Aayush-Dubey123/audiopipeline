@@ -1,0 +1,34 @@
+---
+title: Responsible use
+description: Consent, labelling and watermarking are built into the pipeline, not added on.
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+
+Voice cloning can impersonate people. The pipeline treats that risk as a design requirement.
+
+<CardGrid>
+	<Card title="Consent is required" icon="approve-check">
+		Custom-voice requests must include an explicit consent flag, or they are rejected. Catalogue voices record the speaker’s permission.
+	</Card>
+	<Card title="Inaudible watermark" icon="seti:lock">
+		Every generated chunk carries Resemble AI’s Perth watermark, which survives typical editing and identifies the audio as synthetic.
+	</Card>
+	<Card title="Labelled files" icon="document">
+		Every WAV and MP3 is tagged “AI-generated synthetic voice” in its metadata, and the studio shows an AI badge on every result.
+	</Card>
+	<Card title="Privacy" icon="seti:shell">
+		Client IPs are stored only as salted hashes, uploads are validated and size-limited, and the API never exposes file paths.
+	</Card>
+</CardGrid>
+
+## Why the samples on this site use a built-in voice
+
+The pipeline was developed and measured on a client-provided reference voice. That recording is **authorised for local studio use only**, not for public publishing. So:
+
+- Measurements from the client voice are reported as **numbers only**.
+- Every audio sample on this site uses the model’s **built-in demo voice**, which isn’t a real person.
+
+<Aside type="caution">
+	Only clone a voice you own or have written permission to use, and label the output as AI-generated wherever you publish it.
+</Aside>

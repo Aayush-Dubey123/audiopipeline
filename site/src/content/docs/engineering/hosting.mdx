@@ -1,0 +1,38 @@
+---
+title: Why it isn’t online 24/7
+description: An honest look at what it would take to host a GPU voice-cloning service, and why this project is shown, not hosted.
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+
+## The short answer
+
+The pipeline needs an **NVIDIA GPU with ~4 GB of free memory** for every second it is generating. Free hosting tiers don’t offer GPUs, and a GPU that’s always on costs money every hour, even when nobody is using it.
+
+## What I evaluated
+
+| Option | Cost | GPU | Result |
+|---|---|---|---|
+| Free web hosts (Render, Fly, Railway…) | Free | ❌ | Runs out of memory loading PyTorch; CPU-only even if it fit |
+| Hugging Face Spaces (free) | Free | ❌ CPU only | Minutes per chunk; long scripts impractical |
+| Oracle Cloud Always Free | Free | ❌ ARM CPU | Same problem: far too slow |
+| My laptop + a free tunnel | Free | ✅ RTX 3050 | Works great, **only while the laptop is on** |
+| Rented cloud GPU, always on | ~$0.3–1 per hour | ✅ | Hundreds of dollars a month for a portfolio demo |
+| Serverless GPU (pay per use) | Per second | ✅ | Viable for a product; cold starts of ~40 s to load the model |
+
+<CardGrid>
+	<Card title="One GPU, one job" icon="list-format">
+		Even when hosted, a single GPU serves one narration at a time. A 5-minute script takes about 6–8 minutes to generate.
+	</Card>
+	<Card title="Voice cloning needs guardrails" icon="warning">
+		A public cloning service invites misuse. Consent checks, rate limits and abuse handling become a product of their own.
+	</Card>
+</CardGrid>
+
+## So this site is the deployment
+
+Instead of a demo that would be offline most of the time, this site shows **real outputs, real measurements and the reasoning behind them**, and it’s always online because it’s just static files.
+
+<Aside type="tip" title="Want to try it?">
+	It runs on any NVIDIA GPU with 6 GB or more. See [Run it yourself](../../guides/run-it-yourself/).
+</Aside>

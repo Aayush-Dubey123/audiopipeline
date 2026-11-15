@@ -1,0 +1,37 @@
+---
+title: Lessons & what’s next
+description: What worked, what didn’t, and where this project could go.
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What I learned
+
+<CardGrid>
+	<Card title="Read the model’s source" icon="open-book">
+		The single biggest fix (the 6 s / 10 s conditioning window) was a constant in the model code, not in any documentation.
+	</Card>
+	<Card title="The pipeline matters as much as the model" icon="puzzle">
+		Silence, pauses, loudness and chunk boundaries decided whether the voice sounded human.
+	</Card>
+	<Card title="Measure, then decide" icon="setting">
+		Mixed precision “should” have been faster; it wasn’t. The best-scoring setting “should” have won; it babbled.
+	</Card>
+	<Card title="Small, reversible changes" icon="random">
+		Every phase was tested and A/B’d before the next one, with the test suite green throughout.
+	</Card>
+</CardGrid>
+
+## What didn’t work
+
+- **Mixed precision** on a 6 GB laptop GPU: slower and hungrier, so removed.
+- **Higher expressiveness (≥ 0.65)**: higher similarity on paper, unusable babbling in practice.
+- **Free hosting**: no free tier can run GPU inference; see [why it isn’t online 24/7](../../engineering/hosting/).
+
+## What’s next
+
+- A cleaner, longer reference recording: the largest remaining quality lever.
+- Reading the real client IP from the tunnel header so per-visitor limits work when shared.
+- Exploring a 2.5D cartoon video pipeline that reuses these narrations for short-form video.
+
+<LinkCard title="Back to the start" description="Hear the before & after again." href="../../story/listen/" />

@@ -1,0 +1,50 @@
+---
+title: The problem
+description: The first version cloned the voice, but anyone could tell it was AI. Here is why.
+---
+
+import { Aside, Card, CardGrid } from '@astrojs/starlight/components';
+import StatGrid from '../../../components/StatGrid.astro';
+
+## What I set out to build
+
+A studio where you paste a script, give it a short recording of a voice, and get back a polished narration **in that voice**: Hindi first, English too. It had to run on the hardware I had: a gaming laptop with an **NVIDIA RTX 3050 (6 GB)**.
+
+The engine is [Chatterbox Multilingual](https://github.com/resemble-ai/chatterbox) by Resemble AI, an open model that clones a voice from a few seconds of audio (zero-shot). Around it I built a FastAPI backend with a job queue, long-form chunking up to 30,000 characters, resumable jobs, a React studio UI and a test suite.
+
+## It worked, about 60% of the time
+
+The voice was recognisable. But played to anyone who knew the speaker, it gave itself away within seconds. Similarity scores looked fine; **listening didn’t.**
+
+<CardGrid>
+	<Card title="It sounded spliced" icon="warning">
+		Every few seconds the background hiss vanished and came back: tiny holes of perfect silence between chunks.
+	</Card>
+	<Card title="It sounded flat" icon="warning">
+		The delivery was even and careful, like someone reading, not speaking.
+	</Card>
+	<Card title="The pace was wrong" icon="warning">
+		The real speaker talks fast and dense; the clone was slower and over-articulated.
+	</Card>
+	<Card title="Odd glitches" icon="warning">
+		Occasionally a chunk mumbled, repeated itself, or ended with the voice dropping mid-sentence.
+	</Card>
+</CardGrid>
+
+## The question I asked
+
+Instead of swapping models, I asked: **what in my own pipeline makes the output recognisably synthetic?** That meant reading the model’s source code, measuring the reference audio, and testing every stage between “text in” and “MP3 out”.
+
+<Aside type="tip" title="The surprising answer">
+	Most of the “AI sound” didn’t come from the model. It came from **how the reference was prepared, how settings were chosen, and how chunks were stitched together**, all fixable with small, targeted changes.
+</Aside>
+
+<StatGrid
+	stats={[
+		{ value: '12', label: 'Weak points found', note: 'across reference, settings, stitching, speed' },
+		{ value: '5', label: 'Improvement phases', note: 'each measured before moving on' },
+		{ value: '80', label: 'Automated tests passing', note: 'with no files left behind by the suite' },
+	]}
+/>
+
+Next: [how the pipeline works](../how-it-works/), then [what I fixed](../fixes/).
