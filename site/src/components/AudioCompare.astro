@@ -98,7 +98,7 @@ function bars(peaks: number[]) {
 					</li>
 					<li>noise floor {t.info.noise_floor_db} dB</li>
 				</ul>
-				<audio preload="none" src={t.src} />
+				<audio preload="none" data-src={t.src} />
 			</div>
 		))
 	}
@@ -132,6 +132,9 @@ function bars(peaks: number[]) {
 		return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 	}
 
+	const metadata = (a: HTMLAudioElement) =>
+		a.readyState >= 1 ? Promise.resolve() : new Promise<void>((r) => a.addEventListener('loadedmetadata', () => r(), { once: true }));
+
 	document.querySelectorAll<HTMLElement>('.ap-compare').forEach((root) => {
 		const audios = new Map<string, HTMLAudioElement>();
 		root.querySelectorAll<HTMLElement>('.ap-track').forEach((t) => {
@@ -140,6 +143,24 @@ function bars(peaks: number[]) {
 		const playBtn = root.querySelector<HTMLButtonElement>('.ap-play')!;
 		const time = root.querySelector<HTMLElement>('.ap-time')!;
 		const active = () => audios.get(root.dataset.active!)!;
+
+		// Fetch both clips into memory on first use. In-memory (blob) audio is always seekable,
+		// even when the host ignores HTTP Range requests, so Before/After can keep the playhead.
+		let loading: Promise<void> | null = null;
+		const ensureLoaded = () =>
+			(loading ??= Promise.all(
+				[...audios.values()].map(async (a) => {
+					try {
+						const res = await fetch(a.dataset.src!);
+						if (!res.ok) throw new Error(String(res.status));
+						a.src = URL.createObjectURL(await res.blob());
+					} catch {
+						a.src = a.dataset.src!; // fall back to streaming
+					}
+					a.load();
+					await metadata(a);
+				}),
+			).then(() => undefined));
 
 		const paint = () => {
 			audios.forEach((a, key) => {
@@ -152,7 +173,7 @@ function bars(peaks: number[]) {
 
 		const setPlaying = (on: boolean) => root.classList.toggle('is-playing', on);
 
-		const select = (key: string) => {
+		const select = async (key: string) => {
 			if (key === root.dataset.active) return;
 			const prev = active();
 			const wasPlaying = !prev.paused;
@@ -162,31 +183,28 @@ function bars(peaks: number[]) {
 			root.querySelectorAll<HTMLButtonElement>('.ap-toggle button').forEach((b) =>
 				b.setAttribute('aria-selected', String(b.dataset.key === key)),
 			);
+			await ensureLoaded();
 			const next = active();
-			const seek = () => {
-				next.currentTime = Math.min(at, (next.duration || at) - 0.05);
-				if (wasPlaying) next.play();
-				paint();
-			};
-			if (next.readyState >= 1) seek();
-			else {
-				next.preload = 'auto';
-				next.addEventListener('loadedmetadata', seek, { once: true });
-				next.load();
-			}
+			next.currentTime = Math.min(at, Math.max((next.duration || at) - 0.05, 0));
+			if (wasPlaying) await next.play().catch(() => {});
+			paint();
 		};
 
 		root.querySelectorAll<HTMLButtonElement>('.ap-toggle button').forEach((b) =>
 			b.addEventListener('click', () => select(b.dataset.key!)),
 		);
 
-		playBtn.addEventListener('click', () => {
+		playBtn.addEventListener('click', async () => {
 			// stop any other player on the page
 			document.querySelectorAll<HTMLAudioElement>('.ap-compare audio').forEach((a) => {
 				if (a !== active()) a.pause();
 			});
+			root.classList.add('is-loading');
+			await ensureLoaded();
+			root.classList.remove('is-loading');
 			const a = active();
-			a.paused ? a.play() : a.pause();
+			if (a.paused) await a.play().catch(() => {});
+			else a.pause();
 		});
 
 		audios.forEach((a, key) => {
@@ -200,22 +218,15 @@ function bars(peaks: number[]) {
 
 		root.querySelectorAll<HTMLElement>('.ap-track').forEach((t) => {
 			const svg = t.querySelector('svg')!;
-			svg.addEventListener('click', (e) => {
+			svg.addEventListener('click', async (e) => {
 				const key = t.dataset.key!;
 				const r = svg.getBoundingClientRect();
 				const frac = (e.clientX - r.left) / r.width;
-				select(key);
+				await select(key);
+				await ensureLoaded();
 				const a = audios.get(key)!;
-				const go = () => {
-					a.currentTime = frac * a.duration;
-					paint();
-				};
-				if (a.readyState >= 1) go();
-				else {
-					a.preload = 'auto';
-					a.addEventListener('loadedmetadata', go, { once: true });
-					a.load();
-				}
+				a.currentTime = frac * a.duration;
+				paint();
 			});
 		});
 	});
@@ -348,6 +359,10 @@ function bars(peaks: number[]) {
 		width: 22px;
 		height: 22px;
 		fill: currentColor;
+	}
+	.ap-compare.is-loading .ap-play {
+		opacity: 0.6;
+		cursor: progress;
 	}
 	.ap-icon-pause,
 	.ap-compare.is-playing .ap-icon-play {
