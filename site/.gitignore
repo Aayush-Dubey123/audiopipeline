@@ -19,3 +19,6 @@ pnpm-debug.log*
 
 # macOS-specific files
 .DS_Store
+
+# showcase samples are intentional (root .gitignore excludes *.mp3)
+!public/audio/*.mp3
