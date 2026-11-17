@@ -85,6 +85,7 @@ Strict logging message formats:
 - **Route Error:** `logging.error(f"Error in POST /v1/resource endpoint: {error}")`
 - **Controller / CRUD Error:** `logging.error(f"Error in ResourceController.method_name: {error}")`
 - **STRICT PROHIBITION:** Never log passwords, tokens, API keys, OTPs, auth headers, or raw sensitive payloads.
+- **Polling noise:** repeated successful status/health poll lines (app and uvicorn access) are shown once per 30 s per job by `commons/logger.py` (`PollingNoiseFilter`). Warnings, errors and all other lines are never throttled. Set `LOG_POLL_THROTTLE_SECONDS=0` to see every line.
 
 ---
 

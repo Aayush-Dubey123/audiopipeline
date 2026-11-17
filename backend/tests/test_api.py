@@ -1138,3 +1138,95 @@ def test_non_audio_upload_rejected_without_leaking_paths() -> None:
     assert response.status_code == 400
     body = response.text
     assert "storage" not in body and ":\\" not in body
+
+
+def test_root_health_alias_matches_v1_health() -> None:
+    """
+    Verify GET /health answers like GET /v1/health so monitors that omit the prefix get HTTP 200, not 404.
+    """
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def _log_record(message: str, level: int = 20, name: str = "core.test") -> "logging.LogRecord":
+    """
+    Build a log record for filter tests.
+
+    Args:
+        message (str): Message text.
+        level (int): Logging level number.
+        name (str): Logger name.
+
+    Returns:
+        logging.LogRecord: The record.
+
+    Raises:
+        None
+    """
+    import logging
+
+    return logging.LogRecord(name, level, __file__, 1, message, None, None)
+
+
+def test_polling_filter_shows_repeated_poll_lines_once_per_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Verify a repeated job-status poll line is shown once, again after the window, and per job separately.
+    """
+    from commons.logger import PollingNoiseFilter
+    import commons.logger as logger_module
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(logger_module.time, "monotonic", lambda: clock["now"])
+    log_filter = PollingNoiseFilter(window_seconds=30)
+
+    poll_a = "Calling GET /v1/jobs/aaa111 endpoint"
+    poll_b = "Calling GET /v1/jobs/bbb222 endpoint"
+    assert log_filter.filter(_log_record(poll_a)) is True
+    clock["now"] += 1
+    assert log_filter.filter(_log_record(poll_a)) is False
+    assert log_filter.filter(_log_record(poll_b)) is True
+    clock["now"] += 31
+    assert log_filter.filter(_log_record(poll_a)) is True
+
+
+def test_polling_filter_never_hides_real_events_or_problems() -> None:
+    """
+    Verify job lifecycle lines, warnings, errors, non-200 access lines and other routes always pass.
+    """
+    from commons.logger import PollingNoiseFilter
+
+    log_filter = PollingNoiseFilter(window_seconds=30)
+    for _ in range(3):
+        assert log_filter.filter(_log_record("Executing JobWorker.enqueue_job for job 'aaa111'")) is True
+        assert log_filter.filter(_log_record("Calling POST /v1/tts/preview/custom endpoint")) is True
+        assert log_filter.filter(_log_record("Calling GET /v1/jobs/aaa111 endpoint", level=30)) is True
+        assert log_filter.filter(_log_record("Calling GET /v1/jobs/aaa111 endpoint", level=40)) is True
+        assert log_filter.filter(
+            _log_record('127.0.0.1:5000 - "GET /v1/jobs/aaa111 HTTP/1.1" 404 Not Found', name="uvicorn.access")
+        ) is True
+
+
+def test_polling_filter_throttles_uvicorn_access_lines_and_can_be_disabled() -> None:
+    """
+    Verify successful access lines for polls are throttled regardless of client port, and a zero window disables it.
+    """
+    from commons.logger import PollingNoiseFilter
+
+    log_filter = PollingNoiseFilter(window_seconds=30)
+    first = _log_record('127.0.0.1:50001 - "GET /v1/jobs/aaa111 HTTP/1.1" 200 OK', name="uvicorn.access")
+    second = _log_record('127.0.0.1:50999 - "GET /v1/jobs/aaa111 HTTP/1.1" 200 OK', name="uvicorn.access")
+    assert log_filter.filter(first) is True
+    assert log_filter.filter(second) is False
+
+    # Uvicorn passes the status as a bare number; the phrase is added only by its formatter.
+    import logging
+
+    raw = logging.LogRecord(
+        "uvicorn.access", 20, __file__, 1, '%s - "%s %s HTTP/%s" %d', ("127.0.0.1:50002", "GET", "/v1/health", "1.1", 200), None
+    )
+    assert log_filter.filter(raw) is True
+    assert log_filter.filter(raw) is False
+
+    off = PollingNoiseFilter(window_seconds=0)
+    assert off.filter(first) is True and off.filter(second) is True

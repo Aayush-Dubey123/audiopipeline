@@ -6,15 +6,19 @@ Assembles middleware, routes, lifecycle handlers, and centralized exception enve
 
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+import logging as stdlib_logging
+from commons.logger import POLLING_FILTER
 from core import logger
 from core.config import get_settings
 from core.database.database import init_db
 from core.apis.middleware import SecurityHeadersMiddleware, RateLimitMiddleware
+from core.apis.schemas.responses.catalog_responses import HealthResponse
+from core.controllers.catalog_controller import CatalogController
 from core.apis.routes.catalog_routes import router as catalog_router
 from core.apis.routes.job_routes import router as job_router
 from core.services.jobs.job_worker import job_worker
@@ -214,6 +218,30 @@ def create_app() -> FastAPI:
                 }
             },
         )
+
+    # Uvicorn's own access lines for status/health polls are throttled like the app's lines.
+    stdlib_logging.getLogger("uvicorn.access").addFilter(POLLING_FILTER)
+
+    @application.get("/health", response_model=HealthResponse, include_in_schema=False)
+    def root_health() -> HealthResponse:
+        """
+        Handle GET /health, the path most uptime monitors and tunnels probe by default.
+
+        Returns the same payload as GET /v1/health so a monitor that omits the version
+        prefix does not log a 404 every few seconds.
+
+        Returns:
+            HealthResponse: Status payload with current system state.
+
+        Raises:
+            HTTPException 500: If health evaluation fails unexpectedly.
+        """
+        logging.info("Calling GET /health endpoint")
+        try:
+            return CatalogController.get_health_status()
+        except Exception as error:
+            logging.error(f"Error in GET /health endpoint: {error}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
     # 4. Mount API v1 routers
     application.include_router(catalog_router, prefix="/v1")
