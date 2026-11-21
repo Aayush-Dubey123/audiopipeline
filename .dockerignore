@@ -19,3 +19,18 @@ logs/*
 scratch/*
 tests
 *.md
+
+# --- added: keep the build context small and secret-free ---
+# Patterns above only match at the top level (".venv" does NOT match backend/.venv), so the whole
+# Windows virtualenv, logs and storage were being sent to Docker (5.29 GB) and copied into the image.
+**/.venv
+**/.venv_*
+**/node_modules
+**/__pycache__
+**/tests
+**/logs
+backend/storage
+backend/*.db
+# never bake secrets into the image; the container gets its settings from docker-compose.yml
+**/.env
+!**/.env.example
